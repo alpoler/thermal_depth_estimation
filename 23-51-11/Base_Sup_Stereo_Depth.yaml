@@ -1,0 +1,117 @@
+# training option
+total_epochs: &e 80
+batch_lim_per_epoch: 5000
+imgs_per_gpu: &b 2 # per GPU batch size
+workers_per_gpu: 2
+
+dataset:
+  list: ["MS2"] # ["MS2", "ViViD", ... ]
+  
+  multi:
+    mode: 'sequential' # ["sequential", "parallel"]
+
+  MS2:
+    name: "MS2"
+    dataset_dir: "/mnt/my_disk/alper/thermal"
+    available_modality: ['rgb', 'nir', 'thr']
+    pseudo_disparity: True
+    train:
+      modality: 'thr'
+      seq_length: 1 # number of images e.g., 3 => {T-N, T, T+N}
+      seq_interval: 1 # interval between sequectial images (i.e., N)
+      sample_step: 10  # sampling step S, T=S*t (t=0,1,2,...)
+    val:
+      modality: 'thr'
+      seq_length: 1
+      seq_interval: 1
+      sample_step: 6
+    test:
+      modality: 'thr'
+      seq_length: 1 
+      seq_interval: 1 
+      sample_step: 10
+
+    rgb:
+      train_size: [256, 640] # Original image resol: [384, 1224]
+      test_size : [256, 640] 
+    nir:
+      train_size: [256, 640] # Original image resol: [352, 1280]
+      test_size : [256, 640] 
+    thr:
+      train_size: [256, 640] # Original image resol: [256, 640]
+      test_size : [256, 640]
+
+    data_format: 'StereoMatching' 
+
+  Augmentation:
+    rgb:
+      FlagHFlip: True
+      FlagCrop: True
+      FlagResize: True
+      FlagJitter: True
+
+      FlagImgWiseClip: False 
+      FlagGroupWiseClip: False
+      FlagGroupWiseRearrange: False
+      FlagLCE: False
+      bin_num: 30
+
+    nir:
+      FlagHFlip: True
+      FlagCrop: True
+      FlagResize: True
+      FlagJitter: True
+
+      FlagImgWiseClip: False 
+      FlagGroupWiseClip: False
+      FlagGroupWiseRearrange: False
+      FlagLCE: False
+      bin_num: 30
+
+    thr:
+      FlagHFlip: False
+      FlagCrop: True
+      FlagResize: True
+      FlagJitter: True
+
+      FlagImgWiseClip: True # clipping input image within 1-99% value
+      FlagGroupWiseClip: False 
+      FlagGroupWiseRearrange: False
+      FlagLCE: False
+      bin_num: 30
+
+optim:
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-5
+  optimizer: 'AdamW'
+  scheduler: 'CosineAnnealWithWarmup'
+  CosineAnnealWarm:
+    T_0: 10
+    T_mult: 1
+    eta_min: 1.e-6  
+  CosineAnnealWithWarmup:
+    warmup_steps: 1000
+    warmup_epochs: 1
+    eta_min: 1.e-6
+
+model:
+  eval_mode: 'depth'
+  model_type: 'foundation_stereo'  
+  max_disp: 192
+  valid_iters: 32
+  train_iters: 22
+
+loss:
+  pseudo_disparity: True
+  ordinal_loss: False
+  gradient_loss: False
+  stft_loss: False
+  wavelet_loss: False
+  topological_loss: False
+  triplet_loss: False
+  curvature_loss: True
+  curvature_loss_weight: 1
+  pairwise_ordinal_loss: False
+  pairwise_ordinal_loss_weight: 1.0
+  pairwise_ordinal_n_pairs: 2500
+  pairwise_ordinal_delta: 0.01

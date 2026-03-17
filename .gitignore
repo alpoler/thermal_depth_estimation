@@ -1,0 +1,13 @@
+# Python & Environments
+__pycache__/
+venv/
+.env
+
+# Data, Images, and Model Checkpoints
+*.mat
+*.pth
+*.npy
+
+# OS generated files
+.DS_Store
+Thumbs.db
