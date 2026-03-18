@@ -45,6 +45,9 @@ class StereoDepthBaseModule(LightningModule):
         self.pairwise_ordinal_loss_weight = opt.loss.get('pairwise_ordinal_loss_weight', 1.0)
         self.pairwise_ordinal_n_pairs = opt.loss.get('pairwise_ordinal_n_pairs', 10000)
         self.pairwise_ordinal_delta = opt.loss.get('pairwise_ordinal_delta', 0.01)
+        self.pcgrad_on = opt.loss.get('pcgrad', False)
+        if self.pcgrad_on:
+            self.automatic_optimization = False
 
     def get_optimize_param(self):
         pass
@@ -135,35 +138,71 @@ class StereoDepthBaseModule(LightningModule):
         focal     = batch["focal"]
         baseline  = batch["baseline"]
         psuedo_depth= ((focal[...,None,None]*baseline[...,None])) / psuedo_disparity_gt.clamp(min=1e-5)
-        psuedo_depth = psuedo_depth.clamp(max=1e4)
+        psuedo_depth = psuedo_depth.clamp(max=80)
 
         # network forward
         outputs = self.forward(left_img, right_img,iters=self.train_iters,psuedo_depth=psuedo_depth.unsqueeze(1))
         init_disp, predictions = outputs
-        total_loss  = self.get_losses(init_disp,predictions, disp_gt)
-        if self.pseudo_disparity:
-            psuedo_depth_loss = self.psuedo_disparity_loss(psuedo_disparity_gt,valid_regions_gt,predictions,init_disp,left_img)
-            total_loss+=psuedo_depth_loss
+        loss_depth = self.get_losses(init_disp, predictions, disp_gt)
 
-        # NaN watchdog
-        if not torch.isfinite(total_loss):
-            print(f"[NaN WATCHDOG] batch_idx={batch_idx}")
-            print(f"  psuedo_depth range: {psuedo_depth.min():.4f} ~ {psuedo_depth.max():.4f}")
-            print(f"  init_disp finite: {torch.isfinite(init_disp).all()}, min={init_disp.min():.4f}, max={init_disp.max():.4f}")
-            print(f"  predictions finite: {[torch.isfinite(p).all().item() for p in predictions]}")
-            print(f"  predictions range: {[f'{p.min():.4f}~{p.max():.4f}' for p in predictions]}")
-            base_loss = self.get_losses(init_disp, predictions, disp_gt)
-            print(f"  base get_losses: {base_loss.item()}")
-            if self.pseudo_disparity:
-                pd_loss = self.psuedo_disparity_loss(psuedo_disparity_gt, valid_regions_gt, predictions, init_disp, left_img)
-                print(f"  pseudo_disp_loss: {pd_loss.item()}")
-            # Replace NaN with zero to avoid crashing the run — gradient step is skipped
-            total_loss = torch.zeros(1, device=total_loss.device, requires_grad=True)
+        if self.pseudo_disparity:
+            loss_reg = self.psuedo_disparity_loss(psuedo_disparity_gt, valid_regions_gt, predictions, init_disp, left_img)
+        else:
+            loss_reg = None
+
+        if self.pcgrad_on and loss_reg is not None:
+            opt = self.optimizers()
+            trainable_params = [p for p in self.disp_net.parameters() if p.requires_grad]
+
+            # Gradient for primary depth loss
+            opt.zero_grad()
+            self.manual_backward(loss_depth, retain_graph=True)
+            grads_depth = [p.grad.clone() for p in trainable_params]
+
+            # Gradient for regularization loss
+            opt.zero_grad()
+            self.manual_backward(loss_reg)
+
+            # PCGrad: project BOTH gradients onto each other's normal plane
+            shapes = [p.grad.shape for p in trainable_params]
+            g1 = torch.cat([g.flatten() for g in grads_depth])
+            g2 = torch.cat([p.grad.flatten() for p in trainable_params])
+
+            dot_g1_g2 = torch.dot(g1, g2)
+            coeff1 = torch.clamp(dot_g1_g2, max=0.0) / (torch.dot(g2, g2) + 1e-8)
+            coeff2 = torch.clamp(dot_g1_g2, max=0.0) / (torch.dot(g1, g1) + 1e-8)
+
+            g_pcgrad = ((g1 - coeff1 * g2) + (g2 - coeff2 * g1)) / 2  # mean reduction
+
+            idx = 0
+            for p, shape in zip(trainable_params, shapes):
+                length = p.numel()
+                p.grad = g_pcgrad[idx:idx + length].view(shape).clone()
+                idx += length
+
+            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+
+            opt.step()
+
+            # Step LR scheduler
+            sch = self.lr_schedulers()
+            if sch is not None:
+                sch.step()
+
+            total_loss = loss_depth + loss_reg
+        else:
+            total_loss = loss_depth
+            if loss_reg is not None:
+                total_loss = total_loss + loss_reg
 
         # record log
         self.log('train/total_loss', total_loss)
+        self.log('train/depth_loss', loss_depth)
+        if loss_reg is not None:
+            self.log('train/reg_loss', loss_reg)
 
-
+        if self.pcgrad_on and loss_reg is not None:
+            return None  # manual optimization, no return needed
         return total_loss
 
 
@@ -258,7 +297,7 @@ class FoundationLighting(StereoDepthBaseModule):
 
 
     def get_optimize_param(self):
-        unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4"
+        unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
                               "cost_agg", "corr_feature_att", "corr_stem"]
 
         # 2. Iterate through the network and freeze/unfreeze based on name

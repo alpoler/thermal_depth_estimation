@@ -1,141 +1,151 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+import os
+import os.path as osp
 
+from argparse import ArgumentParser
 
-import os, sys, time,torch,torchvision,pickle,trimesh,itertools,datetime,imageio,logging,joblib,importlib,argparse
-import torch.nn.functional as F
-import torch.nn as nn
-from functools import partial
-import pandas as pd
-import open3d as o3d
-import cv2
-import numpy as np
-# from transformations import *
-code_dir = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(code_dir)
+from mmengine.config import Config
+from models.stereo_model import FoundationLighting  
+from dataloaders import build_dataset
+from omegaconf import OmegaConf
+from torch.utils.data import DataLoader
+from pytorch_lightning.strategies import DDPStrategy
+from core.foundation_stereo import FoundationStereo as FoundationStereoOriginal
+from core.foundation_stereo_lbp import FoundationStereo as FoundationStereoLBP
+from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.callbacks import ModelCheckpoint
+import torch.distributed as dist
+import torch
 
+def parse_args():
+    parser = ArgumentParser()
 
+    # configure file
+    parser.add_argument('--config',default="/home/akayabasi/thermal_depth_estimation/23-51-11/Base_Sup_Stereo_Depth.yaml", help='config file path')
+    parser.add_argument('--out_dir' , type=str, default='checkpoints')
+    parser.add_argument('--exp_name', type=str, default='test_', help='experiment name')
+    parser.add_argument('--num_gpus', type=int, default=2, help='number of gpus')
+    parser.add_argument('--seed', type=int, default=1024)
+    parser.add_argument('--ckpt_path', type=str, default="/mnt/mydisk/alper/foundation_stereo_pretrained/model_best_bp2.pth",
+                        help='pretrained checkpoint path to load')
+    parser.add_argument('--resume', type=str, default=None, help='resume from checkpoint')
 
-def set_logging_format(level=logging.INFO):
-  importlib.reload(logging)
-  FORMAT = '%(message)s'
-  logging.basicConfig(level=level, format=FORMAT, datefmt='%m-%d|%H:%M:%S')
+    return parser.parse_args()
 
-set_logging_format()
+if __name__ == '__main__':
 
+    # parse args
+    args = parse_args()
+    # parse cfg
+    cfg = Config.fromfile(osp.join(args.config))
+    
+    ckpt_dir = args.ckpt_path
+    cfg_foundation_stereo = OmegaConf.load(f'/home/akayabasi/thermal_depth_estimation/23-51-11/cfg.yaml')
+    if 'vit_size' not in cfg_foundation_stereo:
+        cfg_foundation_stereo['vit_size'] = 'vitl'
+    for k in args.__dict__:
+        cfg_foundation_stereo[k] = args.__dict__[k]
+    args_foundation_stereo = OmegaConf.create(cfg_foundation_stereo)
 
-
-def set_seed(random_seed):
-  import torch,random
-  np.random.seed(random_seed)
-  random.seed(random_seed)
-  torch.manual_seed(random_seed)
-  torch.cuda.manual_seed_all(random_seed)
-  torch.backends.cudnn.deterministic = True
-  torch.backends.cudnn.benchmark = False
-
-
-def toOpen3dCloud(points,colors=None,normals=None):
-  cloud = o3d.geometry.PointCloud()
-  cloud.points = o3d.utility.Vector3dVector(points.astype(np.float64))
-  if colors is not None:
-    if colors.max()>1:
-      colors = colors/255.0
-    cloud.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
-  if normals is not None:
-    cloud.normals = o3d.utility.Vector3dVector(normals.astype(np.float64))
-  return cloud
-
-
-
-def depth2xyzmap(depth:np.ndarray, K, uvs:np.ndarray=None, zmin=0.1):
-  invalid_mask = (depth<zmin)
-  H,W = depth.shape[:2]
-  if uvs is None:
-    vs,us = np.meshgrid(np.arange(0,H),np.arange(0,W), sparse=False, indexing='ij')
-    vs = vs.reshape(-1)
-    us = us.reshape(-1)
-  else:
-    uvs = uvs.round().astype(int)
-    us = uvs[:,0]
-    vs = uvs[:,1]
-  zs = depth[vs,us]
-  xs = (us-K[0,2])*zs/K[0,0]
-  ys = (vs-K[1,2])*zs/K[1,1]
-  pts = np.stack((xs.reshape(-1),ys.reshape(-1),zs.reshape(-1)), 1)  #(N,3)
-  xyz_map = np.zeros((H,W,3), dtype=np.float32)
-  xyz_map[vs,us] = pts
-  if invalid_mask.any():
-    xyz_map[invalid_mask] = 0
-  return xyz_map
-
-
-
-def freeze_model(model):
-  model = model.eval()
-  for p in model.parameters():
-    p.requires_grad = False
-  for p in model.buffers():
-    p.requires_grad = False
-  return model
-
-
-
-def get_resize_keep_aspect_ratio(H, W, divider=16, max_H=1232, max_W=1232):
-  assert max_H%divider==0
-  assert max_W%divider==0
-
-  def round_by_divider(x):
-    return int(np.ceil(x/divider)*divider)
-
-  H_resize = round_by_divider(H)   #!NOTE KITTI width=1242
-  W_resize = round_by_divider(W)
-  if H_resize>max_H or W_resize>max_W:
-    if H_resize>W_resize:
-      W_resize = round_by_divider(W_resize*max_H/H_resize)
-      H_resize = max_H
+    model_type = cfg.model.get('model_type', 'foundation_stereo')
+    if model_type == 'foundation_stereo_lbp':
+        print(f"Initializing FoundationStereoLBP model...")
+        model = FoundationStereoLBP(args_foundation_stereo)
+        strict_loading = False
     else:
-      H_resize = round_by_divider(H_resize*max_W/W_resize)
-      W_resize = max_W
-  return int(H_resize), int(W_resize)
+        print(f"Initializing FoundationStereoOriginal model...")
+        model = FoundationStereoOriginal(args_foundation_stereo)
+        strict_loading = True
 
+    ckpt = torch.load(ckpt_dir)
+    model.load_state_dict(ckpt['model'], strict=strict_loading)
+    
+    # show information
+    print(f'Now training with {args.config}...')
 
-def vis_disparity(disp, min_val=None, max_val=None, invalid_thres=np.inf, color_map=cv2.COLORMAP_TURBO, cmap=None, other_output={}):
-  """
-  @disp: np array (H,W)
-  @invalid_thres: > thres is invalid
-  """
-  disp = disp.copy()
-  H,W = disp.shape[:2]
-  invalid_mask = disp>=invalid_thres
-  if (invalid_mask==0).sum()==0:
-    other_output['min_val'] = None
-    other_output['max_val'] = None
-    return np.zeros((H,W,3))
-  if min_val is None:
-    min_val = disp[invalid_mask==0].min()
-  if max_val is None:
-    max_val = disp[invalid_mask==0].max()
-  other_output['min_val'] = min_val
-  other_output['max_val'] = max_val
-  vis = ((disp-min_val)/(max_val-min_val)).clip(0,1) * 255
-  if cmap is None:
-    vis = cv2.applyColorMap(vis.clip(0, 255).astype(np.uint8), color_map)[...,::-1]
-  else:
-    vis = cmap(vis.astype(np.uint8))[...,:3]*255
-  if invalid_mask.any():
-    vis[invalid_mask] = 0
-  return vis.astype(np.uint8)
+    # configure seed
+    seed_everything(args.seed)
 
+    # prepare data loader & ckpt_callback
+    dataset = build_dataset(cfg.dataset, cfg.model.eval_mode, split='train_val')
 
+    train_loader = DataLoader(dataset['train'],
+                              batch_size=cfg.imgs_per_gpu,
+                              shuffle=True,
+                              num_workers=cfg.workers_per_gpu,
+                              pin_memory=True,
+                              drop_last=True,
+                              persistent_workers=cfg.workers_per_gpu > 0)
 
-def depth_uint8_decoding(depth_uint8, scale=1000):
-  depth_uint8 = depth_uint8.astype(float)
-  out = depth_uint8[...,0]*255*255 + depth_uint8[...,1]*255 + depth_uint8[...,2]
-  return out/float(scale)
+    # define ckpt_callback
+    val_loaders = []
+    checkpoint_callbacks = []
+    out_dir = cfg.get('out_dir', args.out_dir)
+    exp_name = cfg.get('exp_name', args.exp_name)
+    work_dir = osp.join(out_dir, exp_name)
+    os.makedirs(work_dir, exist_ok=True)
 
+    if 'depth' in cfg.model.eval_mode: 
+      val_loader_  = DataLoader(dataset['val']['depth'],
+                                batch_size=cfg.imgs_per_gpu,
+                                shuffle=False,
+                                num_workers=cfg.workers_per_gpu,
+                                pin_memory=True,
+                                drop_last=True,
+                                persistent_workers=cfg.workers_per_gpu > 0)
+
+      callback_   = ModelCheckpoint(dirpath=work_dir,
+                                    save_weights_only=False,
+                                    monitor='val_loss',
+                                    mode='min',
+                                    save_top_k=1,
+                                    filename='ckpt_{epoch:02d}_{step}')
+                                    # every_n_epochs=cfg.checkpoint_epoch_interval)
+
+      val_loaders.append(val_loader_)             
+      checkpoint_callbacks.append(callback_)                        
+
+    print('{} samples found for training'.format(len(train_loader)))
+    for idx, val_loader in enumerate(val_loaders):
+      print('{} samples found for validatioin set {}'.format(len(val_loader), idx))
+
+    # build model
+    model = FoundationLighting(opt=cfg,model=model)
+
+    # training
+    # gradient clipping is handled manually when pcgrad is enabled
+    use_pcgrad = cfg.loss.get('pcgrad', False)
+    trainer_kwargs = dict(
+        strategy=DDPStrategy(find_unused_parameters=True) if args.num_gpus > 1 else None,
+        accelerator="gpu",
+        devices=args.num_gpus,
+        default_root_dir=work_dir,
+        num_nodes=1,
+        num_sanity_val_steps=5,
+        max_epochs=cfg.total_epochs,
+        log_every_n_steps=5,
+        check_val_every_n_epoch=1,
+        limit_train_batches=cfg.batch_lim_per_epoch,
+        callbacks=checkpoint_callbacks,
+        benchmark=True,
+        precision="bf16",
+        sync_batchnorm=True,
+    )
+    if not use_pcgrad:
+        trainer_kwargs['gradient_clip_val'] = 1.0
+        trainer_kwargs['gradient_clip_algorithm'] = 'norm'
+    trainer = Trainer(**trainer_kwargs)
+    try:
+        resume_from_ckpt = None
+        if args.resume is not None:
+             ckpt = torch.load(args.resume)
+             if 'optimizer_states' not in ckpt or not ckpt['optimizer_states']:
+                 print(f"Propagating weights from {args.resume} (Optimizer state not found - Warm Start)")
+                 model.load_state_dict(ckpt['state_dict'], strict=False)
+             else:
+                 print(f"Resuming full state from {args.resume}")
+                 resume_from_ckpt = args.resume
+
+        trainer.fit(model, train_loader, val_dataloaders=val_loader, ckpt_path=resume_from_ckpt)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()

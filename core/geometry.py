@@ -13,7 +13,7 @@ import torch.nn as nn
 import numpy as np
 import re
 import sys
-sys.path.append("/home/akayabasi/foundation_stereo_thermal/")
+sys.path.append("/home/akayabasi/thermal_depth_estimation/")
 from torch.distributions import Beta
 from core.utils.utils import bilinear_sampler
 from core.extractor import ResidualBlock
