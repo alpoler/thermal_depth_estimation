@@ -1,5 +1,3 @@
-import copy
-import random
 import torch
 import numpy as np
 from losses.original_ranking import EdgeguidedRankingLoss
@@ -13,93 +11,6 @@ from losses.wavelet_loss import HFDTeacherBlock, CharbonnierLoss
 from losses.curvature_loss import CurvatureLoss
 from losses.pairwise_ordinal_loss import ordinal_loss as pairwise_ordinal_loss
 from core.utils.utils import rescale_modulation
-class PCGrad():
-    def __init__(self, optimizer, reduction='mean'):
-        self._optim, self._reduction = optimizer, reduction
-
-    @property
-    def optimizer(self):
-        return self._optim
-
-    def zero_grad(self):
-        return self._optim.zero_grad(set_to_none=True)
-
-    def step(self):
-        return self._optim.step()
-
-    def pc_backward(self, objectives):
-        grads, shapes, has_grads = self._pack_grad(objectives)
-        pc_grad = self._project_conflicting(grads, has_grads)
-        pc_grad = self._unflatten_grad(pc_grad, shapes[0])
-        self._set_grad(pc_grad)
-
-    def _project_conflicting(self, grads, has_grads, shapes=None):
-        shared = torch.stack(has_grads).prod(0).bool()
-        pc_grad, num_task = copy.deepcopy(grads), len(grads)
-        for g_i in pc_grad:
-            random.shuffle(grads)
-            for g_j in grads:
-                g_i_g_j = torch.dot(g_i, g_j)
-                if g_i_g_j < 0:
-                    g_i -= (g_i_g_j) * g_j / (g_j.norm()**2)
-        merged_grad = torch.zeros_like(grads[0]).to(grads[0].device)
-        if self._reduction == 'mean':
-            merged_grad[shared] = torch.stack([g[shared]
-                                           for g in pc_grad]).mean(dim=0)
-        elif self._reduction == 'sum':
-            merged_grad[shared] = torch.stack([g[shared]
-                                           for g in pc_grad]).sum(dim=0)
-        else:
-            raise ValueError('invalid reduction method')
-
-        merged_grad[~shared] = torch.stack([g[~shared]
-                                            for g in pc_grad]).sum(dim=0)
-        return merged_grad
-
-    def _set_grad(self, grads):
-        idx = 0
-        for group in self._optim.param_groups:
-            for p in group['params']:
-                p.grad = grads[idx]
-                idx += 1
-
-    def _pack_grad(self, objectives):
-        grads, shapes, has_grads = [], [], []
-        for obj in objectives:
-            self._optim.zero_grad(set_to_none=True)
-            obj.backward(retain_graph=True)
-            grad, shape, has_grad = self._retrieve_grad()
-            grads.append(self._flatten_grad(grad, shape))
-            has_grads.append(self._flatten_grad(has_grad, shape))
-            shapes.append(shape)
-        return grads, shapes, has_grads
-
-    def _unflatten_grad(self, grads, shapes):
-        unflatten_grad, idx = [], 0
-        for shape in shapes:
-            length = np.prod(shape)
-            unflatten_grad.append(grads[idx:idx + length].view(shape).clone())
-            idx += length
-        return unflatten_grad
-
-    def _flatten_grad(self, grads, shapes):
-        return torch.cat([g.flatten() for g in grads])
-
-    def _retrieve_grad(self):
-        grad, shape, has_grad = [], [], []
-        for group in self._optim.param_groups:
-            for p in group['params']:
-                if p.grad is None:
-                    shape.append(p.shape)
-                    grad.append(torch.zeros_like(p).to(p.device))
-                    has_grad.append(torch.zeros_like(p).to(p.device))
-                    continue
-                shape.append(p.grad.shape)
-                grad.append(p.grad.clone())
-                has_grad.append(torch.ones_like(p).to(p.device))
-        return grad, shape, has_grad
-
-
 class StereoDepthBaseModule(LightningModule):
     def __init__(self, opt):
         super().__init__()
@@ -154,9 +65,6 @@ class StereoDepthBaseModule(LightningModule):
             optimizer = torch.optim.AdamW(optim_params)
         elif self.optim_opt.optimizer == 'SGD' :
             optimizer = torch.optim.SGD(optim_params)
-
-        if self.pcgrad_on:
-            self._pc_optimizer = PCGrad(optimizer)
 
         if self.optim_opt.scheduler == 'CosineAnnealWarm' :
             scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer,
@@ -243,10 +151,43 @@ class StereoDepthBaseModule(LightningModule):
             loss_reg = None
 
         if self.pcgrad_on and loss_reg is not None:
-            self._pc_optimizer.pc_backward([loss_depth, loss_reg])
-            trainable_params = [p for group in self._pc_optimizer.optimizer.param_groups for p in group['params']]
+            opt = self.optimizers()
+            trainable_params = [p for p in self.disp_net.parameters() if p.requires_grad]
+
+            # Gradient for primary depth loss
+            opt.zero_grad()
+            self.manual_backward(loss_depth, retain_graph=True)
+            grads_depth = [p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in trainable_params]
+
+            # Gradient for regularization loss
+            opt.zero_grad()
+            self.manual_backward(loss_reg)
+
+            # PCGrad: project BOTH gradients onto each other's normal plane
+            shapes = [p.shape for p in trainable_params]
+            g1 = torch.cat([g.flatten() for g in grads_depth])
+            g2 = torch.cat([p.grad.flatten() if p.grad is not None else torch.zeros(p.numel(), device=p.device) for p in trainable_params])
+
+            assert torch.isfinite(g1).all(), f"NaN/Inf in g1 (depth loss grads), max={g1.abs().max()}, loss_depth={loss_depth.item()}"
+            assert torch.isfinite(g2).all(), f"NaN/Inf in g2 (reg loss grads), max={g2.abs().max()}, loss_reg={loss_reg.item()}"
+
+            dot_g1_g2 = torch.dot(g1, g2)
+            coeff1 = torch.clamp(dot_g1_g2, max=0.0) / (torch.dot(g2, g2) + 1e-8)
+            coeff2 = torch.clamp(dot_g1_g2, max=0.0) / (torch.dot(g1, g1) + 1e-8)
+
+            g_pcgrad = ((g1 - coeff1 * g2) + (g2 - coeff2 * g1))  # mean reduction
+
+            assert torch.isfinite(g_pcgrad).all(), f"NaN/Inf in g_pcgrad after projection, dot={dot_g1_g2.item()}, coeff1={coeff1.item()}, coeff2={coeff2.item()}"
+
+            idx = 0
+            for p, shape in zip(trainable_params, shapes):
+                length = p.numel()
+                p.grad = g_pcgrad[idx:idx + length].view(shape).clone()
+                idx += length
+
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
-            self._pc_optimizer.step()
+
+            opt.step()
 
             # Step LR scheduler
             sch = self.lr_schedulers()
