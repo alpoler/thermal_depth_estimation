@@ -10,6 +10,7 @@ from utils.visualization import *
 from losses.wavelet_loss import HFDTeacherBlock, CharbonnierLoss
 from losses.curvature_loss import CurvatureLoss
 from losses.pairwise_ordinal_loss import ordinal_loss as pairwise_ordinal_loss
+from losses.aligned_mtl import AlignedMTL
 from core.utils.utils import rescale_modulation
 class StereoDepthBaseModule(LightningModule):
     def __init__(self, opt):
@@ -45,8 +46,9 @@ class StereoDepthBaseModule(LightningModule):
         self.pairwise_ordinal_loss_weight = opt.loss.get('pairwise_ordinal_loss_weight', 1.0)
         self.pairwise_ordinal_n_pairs = opt.loss.get('pairwise_ordinal_n_pairs', 10000)
         self.pairwise_ordinal_delta = opt.loss.get('pairwise_ordinal_delta', 0.01)
-        self.pcgrad_on = opt.loss.get('pcgrad', False)
-        if self.pcgrad_on:
+        self.use_aligned_mtl = opt.loss.get('grad_method', 'none') == 'aligned_mtl'
+        if self.use_aligned_mtl:
+            self.aligned_mtl = AlignedMTL(weights=opt.loss.get('aligned_mtl_weights', [0.5, 0.5]))
             self.automatic_optimization = False
 
     def get_optimize_param(self):
@@ -150,46 +152,34 @@ class StereoDepthBaseModule(LightningModule):
         else:
             loss_reg = None
 
-        if self.pcgrad_on and loss_reg is not None:
+        if self.use_aligned_mtl and loss_reg is not None:
             opt = self.optimizers()
             trainable_params = [p for p in self.disp_net.parameters() if p.requires_grad]
 
-            # Gradient for primary depth loss
             opt.zero_grad()
             self.manual_backward(loss_depth, retain_graph=True)
-            grads_depth = [p.grad.clone() if p.grad is not None else torch.zeros_like(p) for p in trainable_params]
+            grads_depth = torch.cat([p.grad.flatten() if p.grad is not None
+                                     else torch.zeros(p.numel(), device=p.device)
+                                     for p in trainable_params])
 
-            # Gradient for regularization loss
             opt.zero_grad()
             self.manual_backward(loss_reg)
+            grads_reg = torch.cat([p.grad.flatten() if p.grad is not None
+                                   else torch.zeros(p.numel(), device=p.device)
+                                   for p in trainable_params])
 
-            # PCGrad: project BOTH gradients onto each other's normal plane
-            shapes = [p.shape for p in trainable_params]
-            g1 = torch.cat([g.flatten() for g in grads_depth])
-            g2 = torch.cat([p.grad.flatten() if p.grad is not None else torch.zeros(p.numel(), device=p.device) for p in trainable_params])
-
-            assert torch.isfinite(g1).all(), f"NaN/Inf in g1 (depth loss grads), max={g1.abs().max()}, loss_depth={loss_depth.item()}"
-            assert torch.isfinite(g2).all(), f"NaN/Inf in g2 (reg loss grads), max={g2.abs().max()}, loss_reg={loss_reg.item()}"
-
-            dot_g1_g2 = torch.dot(g1, g2)
-            coeff1 = torch.clamp(dot_g1_g2, max=0.0) / (torch.dot(g2, g2) + 1e-8)
-            coeff2 = torch.clamp(dot_g1_g2, max=0.0) / (torch.dot(g1, g1) + 1e-8)
-
-            g_pcgrad = ((g1 - coeff1 * g2) + (g2 - coeff2 * g1))  # mean reduction
-
-            assert torch.isfinite(g_pcgrad).all(), f"NaN/Inf in g_pcgrad after projection, dot={dot_g1_g2.item()}, coeff1={coeff1.item()}, coeff2={coeff2.item()}"
+            combined = self.aligned_mtl(grads_depth, grads_reg)
 
             idx = 0
-            for p, shape in zip(trainable_params, shapes):
+            for p in trainable_params:
                 length = p.numel()
-                p.grad = g_pcgrad[idx:idx + length].view(shape).clone()
+                p.grad = combined[idx:idx + length].view(p.shape)
                 idx += length
 
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
 
             opt.step()
 
-            # Step LR scheduler
             sch = self.lr_schedulers()
             if sch is not None:
                 sch.step()
@@ -206,8 +196,8 @@ class StereoDepthBaseModule(LightningModule):
         if loss_reg is not None:
             self.log('train/reg_loss', loss_reg)
 
-        if self.pcgrad_on and loss_reg is not None:
-            return None  # manual optimization, no return needed
+        if self.use_aligned_mtl and loss_reg is not None:
+            return None
         return total_loss
 
 
