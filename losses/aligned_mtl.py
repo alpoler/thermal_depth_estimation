@@ -1,3 +1,5 @@
+from typing import List, Optional
+
 import torch
 import torch.nn as nn
 
@@ -39,7 +41,7 @@ class AlignedMTL(nn.Module):
         combined_grad = mtl(grads_depth, grads_reg)
     """
 
-    def __init__(self, weights: list[float] | None = None):
+    def __init__(self, weights: Optional[List[float]] = None):
         super().__init__()
         if weights is None:
             weights = [0.5, 0.5]

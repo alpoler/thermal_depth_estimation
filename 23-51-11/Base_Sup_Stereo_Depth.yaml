@@ -1,5 +1,5 @@
 # training option
-out_dir: /mnt/my_disk/alper/thermal_depth_exps
+out_dir: /mnt/mydisk/alper/thermal_depth_exps
 exp_name: exp_aligned_mtl_curvature
 total_epochs: &e 80
 batch_lim_per_epoch: 5000
@@ -14,7 +14,7 @@ dataset:
 
   MS2:
     name: "MS2"
-    dataset_dir: "/mnt/my_disk/alper/thermal"
+    dataset_dir: "/mnt/mydisk/thermal"
     available_modality: ['rgb', 'nir', 'thr']
     pseudo_disparity: True
     train:

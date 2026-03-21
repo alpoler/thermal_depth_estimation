@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument('--exp_name', type=str, default='test_', help='experiment name')
     parser.add_argument('--num_gpus', type=int, default=2, help='number of gpus')
     parser.add_argument('--seed', type=int, default=1024)
-    parser.add_argument('--ckpt_path', type=str, default="/mnt/my_disk/alper/foundation_stereo_pretrained/model_best_bp2.pth",
+    parser.add_argument('--ckpt_path', type=str, default="/mnt/mydisk/alper/foundation_stereo_pretrained/model_best_bp2.pth",
                         help='pretrained checkpoint path to load')
     parser.add_argument('--resume', type=str, default=None, help='resume from checkpoint')
 
