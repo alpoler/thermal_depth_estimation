@@ -11,3 +11,8 @@ venv/
 # OS generated files
 .DS_Store
 Thumbs.db
+thermal_env.txt
+thermal_env.yml
+*.err
+*.out
+*.sh

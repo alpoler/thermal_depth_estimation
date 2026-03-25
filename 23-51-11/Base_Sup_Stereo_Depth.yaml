@@ -1,9 +1,9 @@
 # training option
-out_dir: /mnt/my_disk/alper/thermal_depth_exps
-exp_name: exp_pcgrad_curvature
+out_dir: /data/VishwanathSaragadam/thermal_depth_exps
+exp_name: exp_pcgrad_curvature_large_bs
 total_epochs: &e 80
 batch_lim_per_epoch: 5000
-imgs_per_gpu: &b 2 # per GPU batch size
+imgs_per_gpu: &b 4 # per GPU batch size
 workers_per_gpu: 2
 
 dataset:
@@ -14,7 +14,7 @@ dataset:
 
   MS2:
     name: "MS2"
-    dataset_dir: "/mnt/mydisk/thermal"
+    dataset_dir: "/data/VishwanathSaragadam/thermal"
     available_modality: ['rgb', 'nir', 'thr']
     pseudo_disparity: True
     train:
