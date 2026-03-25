@@ -20,12 +20,12 @@ def parse_args():
     parser = ArgumentParser()
 
     # configure file
-    parser.add_argument('--config',default="/home/akayabasi/thermal_depth_estimation/23-51-11/Base_Sup_Stereo_Depth.yaml", help='config file path')
+    parser.add_argument('--config',default="/home/eegrad/akayabasi/thermal_depth_estimation/23-51-11/Base_Sup_Stereo_Depth.yaml", help='config file path')
     parser.add_argument('--out_dir' , type=str, default='checkpoints')
     parser.add_argument('--exp_name', type=str, default='test_', help='experiment name')
-    parser.add_argument('--num_gpus', type=int, default=2, help='number of gpus')
+    parser.add_argument('--num_gpus', type=int, default=1, help='number of gpus')
     parser.add_argument('--seed', type=int, default=1024)
-    parser.add_argument('--ckpt_path', type=str, default="/mnt/mydisk/alper/foundation_stereo_pretrained/model_best_bp2.pth",
+    parser.add_argument('--ckpt_path', type=str, default="/data/VishwanathSaragadam/foundation_stereo_pretrained/model_best_bp2.pth",
                         help='pretrained checkpoint path to load')
     parser.add_argument('--resume', type=str, default=None, help='resume from checkpoint')
 
@@ -39,7 +39,7 @@ if __name__ == '__main__':
     cfg = Config.fromfile(osp.join(args.config))
     
     ckpt_dir = args.ckpt_path
-    cfg_foundation_stereo = OmegaConf.load(f'/home/akayabasi/thermal_depth_estimation/23-51-11/cfg.yaml')
+    cfg_foundation_stereo = OmegaConf.load(f'/home/eegrad/akayabasi/thermal_depth_estimation/23-51-11/cfg.yaml')
     if 'vit_size' not in cfg_foundation_stereo:
         cfg_foundation_stereo['vit_size'] = 'vitl'
     for k in args.__dict__:
@@ -62,7 +62,12 @@ if __name__ == '__main__':
         strict_loading = True
 
     ckpt = torch.load(ckpt_dir)
-    model.load_state_dict(ckpt['model'], strict=strict_loading)
+    load_info = model.load_state_dict(ckpt['model'], strict=strict_loading)
+    if not strict_loading:
+        if load_info.missing_keys:
+            print(f"[Checkpoint] Missing keys in model (not in ckpt): {load_info.missing_keys}")
+        if load_info.unexpected_keys:
+            print(f"[Checkpoint] Unexpected keys in ckpt (not in model): {load_info.unexpected_keys}")
     
     # show information
     print(f'Now training with {args.config}...')

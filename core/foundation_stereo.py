@@ -292,10 +292,8 @@ class FoundationStereoBetaNLL(FoundationStereo):
 
     def __init__(self, args):
         super().__init__(args)
-        from core.update import DispHead
-        self.uncertainty_head = DispHead(args.hidden_dims[0], 256, output_dim=1)
-        nn.init.zeros_(self.uncertainty_head.conv[-1].weight)
-        nn.init.constant_(self.uncertainty_head.conv[-1].bias, -2.0)
+        from core.update import BetaNLLUpdateBlock
+        self.update_block = BetaNLLUpdateBlock(args, hidden_dim=args.hidden_dims[0], volume_dim=28)
 
     def run_gru_iterations(self, iters, disp, geo_fn, coords,
                            net_list, inp_list, att, stem_2x, test_mode, low_memory):
@@ -305,19 +303,22 @@ class FoundationStereoBetaNLL(FoundationStereo):
             disp = disp.detach()
             geo_feat = geo_fn(disp, coords, low_memory=low_memory)
             with autocast(enabled=self.args.mixed_precision):
-                net_list, mask_feat_4, delta_disp = self.update_block(net_list, inp_list, geo_feat, disp, att)
+                net_list, mask_feat_4, delta_disp, log_scale = self.update_block(net_list, inp_list, geo_feat, disp, att)
 
             disp = disp + delta_disp.float()
             if test_mode and itr < iters-1:
                 continue
 
-            disp_up = self.upsample_disp(disp.float(), mask_feat_4.float(), stem_2x.float())
-            disp_preds.append(disp_up)
+            with autocast(enabled=self.args.mixed_precision):
+                xspx = self.spx_2_gru(mask_feat_4, stem_2x)
+                spx_pred = F.softmax(self.spx_gru(xspx), 1)
+                disp_up = context_upsample(disp*4., spx_pred).unsqueeze(1)
 
-            log_scale = self.uncertainty_head(net_list[0])
-            log_scale = log_scale.float().clamp(-10.0, 10.0)
-            log_scale_up = F.interpolate(log_scale, scale_factor=4, mode='bilinear', align_corners=True)
-            log_scale_preds.append(log_scale_up)
+            disp_preds.append(disp_up.float())
+
+            log_scale = log_scale.clamp(-5.0, 5.0)
+            log_scale_up = context_upsample(log_scale, spx_pred.detach()).unsqueeze(1)
+            log_scale_preds.append(log_scale_up.float())
 
         return disp_preds, log_scale_preds
 

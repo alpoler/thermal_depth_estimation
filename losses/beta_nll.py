@@ -19,10 +19,10 @@ class BetaLaplacianNLLLoss(nn.Module):
         target_lidar: (B, 1, H, W) - The ground truth disparity
         valid_mask: (B, 1, H, W) - Boolean mask of valid points
         """
-        l1_error = torch.abs(pred_depth - target_lidar)
+        error = torch.nn.functional.smooth_l1_loss(pred_depth, target_lidar, reduction='none', beta=1.0)
 
-        # Laplacian NLL: loss = exp(-s) * |y - y_hat| + s
-        nll_loss = torch.exp(-log_scale) * l1_error + log_scale
+        # NLL: loss = exp(-s) * ρ(y - y_hat) + s
+        nll_loss = torch.exp(-log_scale) * error + log_scale
 
         if self.beta > 0:
             scale_parameter_detached = torch.exp(log_scale).detach()

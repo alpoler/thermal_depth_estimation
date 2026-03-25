@@ -288,6 +288,8 @@ class FoundationLighting(StereoDepthBaseModule):
         self.max_disp = opt.model.max_disp
         self.criterion = torch.nn.functional.smooth_l1_loss
         self.beta_nll = opt.loss.get('beta_nll', False)
+        self.warmup_beta_nll_epochs = opt.loss.get('warmup_beta_nll_epochs', 0)
+        self._beta_nll_initialized = False
         if self.beta_nll:
             self.beta_nll_criterion = BetaLaplacianNLLLoss(beta=opt.loss.get('beta_nll_beta', 0.5))
 
@@ -298,24 +300,36 @@ class FoundationLighting(StereoDepthBaseModule):
         unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
                               "cost_agg", "corr_feature_att", "corr_stem", "uncertainty_head"]
 
+        uncertainty_lr_scale = self.optim_opt.get('uncertainty_lr_scale', 0.1)
+
         # 2. Iterate through the network and freeze/unfreeze based on name
+        main_params = []
+        uncertainty_params = []
         for name, param in self.disp_net.named_parameters():
             if any(keyword in name for keyword in unfrozed_keywords):
-                param.requires_grad = True
+                if "uncertainty_head" in name:
+                    param.requires_grad = False
+                    uncertainty_params.append(param)
+                else:
+                    param.requires_grad = True
+                    main_params.append(param)
             else:
                 param.requires_grad = False
-        
-        # 3. Pass ONLY the trainable parameters (requires_grad=True) to the optimizer
+
+        # 3. Pass trainable parameters with separate LR for uncertainty head
         optim_params = [
             {
-                'params': filter(lambda p: p.requires_grad, self.disp_net.parameters()), 
-                'lr': self.optim_opt.learning_rate, 
+                'params': main_params,
+                'lr': self.optim_opt.learning_rate,
                 'weight_decay': self.optim_opt.weight_decay
             },
         ]
-       # optim_params = [
-       #     {'params': self.disp_net.parameters(), 'lr': self.optim_opt.learning_rate, 'weight_decay': self.optim_opt.weight_decay},
-       # ]
+        if uncertainty_params:
+            optim_params.append({
+                'params': uncertainty_params,
+                'lr': self.optim_opt.learning_rate * uncertainty_lr_scale,
+                'weight_decay': self.optim_opt.weight_decay
+            })
         return optim_params
 
     def inference_disp(self, left_img, right_img, psuedo_depth=None):
@@ -355,7 +369,8 @@ class FoundationLighting(StereoDepthBaseModule):
             # Exponentially increasing weight: Early steps have low weight, final step has high weight
             i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
 
-            if self.beta_nll and log_scale_preds is not None:
+            use_beta_nll_now = self.beta_nll and log_scale_preds is not None and self.current_epoch >= self.warmup_beta_nll_epochs
+            if use_beta_nll_now:
                 i_loss = self.beta_nll_criterion(disp_preds[i], log_scale_preds[i], disp_gt, valid_bool)
                 disp_loss += i_weight * i_loss
             else:
@@ -364,6 +379,22 @@ class FoundationLighting(StereoDepthBaseModule):
                 disp_loss += i_weight * i_loss.mean()
 
         return disp_loss
+
+    def _initialize_uncertainty_head(self, mean_epe):
+        optimal_log_scale = torch.log(torch.tensor(mean_epe, dtype=torch.float32))
+        with torch.no_grad():
+            self.disp_net.update_block.disp_head.uncertainty_head.bias.fill_(optimal_log_scale.item())
+            self.disp_net.update_block.disp_head.uncertainty_head.weight.zero_()
+        for param in self.disp_net.update_block.disp_head.uncertainty_head.parameters():
+            param.requires_grad = True
+        self._beta_nll_initialized = True
+        print(f"[Beta-NLL] Initialized uncertainty head bias to {optimal_log_scale.item():.4f} (mean_epe={mean_epe:.4f})")
+
+    def validation_epoch_end(self, outputs):
+        super().validation_epoch_end(outputs)
+        if self.beta_nll and not self._beta_nll_initialized and self.current_epoch == self.warmup_beta_nll_epochs - 1:
+            mean_epe = np.array([x['epe'] for x in outputs]).mean()
+            self._initialize_uncertainty_head(mean_epe)
 
     def weighted_sequence_loss(self, preds, target, criterion, gamma=0.9):
         loss_gamma = gamma

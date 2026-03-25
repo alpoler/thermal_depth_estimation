@@ -30,6 +30,20 @@ class DispHead(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
+
+class DispHeadWithUncertainty(DispHead):
+    def __init__(self, input_dim=128, hidden_dim=256, output_dim=1):
+        super().__init__(input_dim, hidden_dim, output_dim)
+        self.uncertainty_head = nn.Conv2d(input_dim, 1, 3, padding=1)
+        nn.init.zeros_(self.uncertainty_head.weight)
+        nn.init.constant_(self.uncertainty_head.bias, 0)
+
+    def forward(self, x):
+        features = self.conv[:-1](x)
+        disp = self.conv[-1](features)
+        log_scale = self.uncertainty_head(features)
+        return disp, log_scale
+
 class ConvGRU(nn.Module):
     def __init__(self, hidden_dim, input_dim, kernel_size=3):
         super(ConvGRU, self).__init__()
@@ -158,3 +172,30 @@ class BasicSelectiveMultiUpdateBlock(nn.Module):
         mask = .25 * self.mask(net[0])
 
         return net, mask, delta_disp
+
+
+class BetaNLLUpdateBlock(BasicSelectiveMultiUpdateBlock):
+    def __init__(self, args, hidden_dim=128, volume_dim=8):
+        super().__init__(args, hidden_dim, volume_dim)
+        self.disp_head = DispHeadWithUncertainty(hidden_dim, 256)
+
+    def forward(self, net, inp, corr, disp, att):
+        if self.args.n_gru_layers == 3:
+            net[2] = self.gru16(att[2], net[2], inp[2], pool2x(net[1]))
+        if self.args.n_gru_layers >= 2:
+            if self.args.n_gru_layers > 2:
+                net[1] = self.gru08(att[1], net[1], inp[1], pool2x(net[0]), interp(net[2], net[1]))
+            else:
+                net[1] = self.gru08(att[1], net[1], inp[1], pool2x(net[0]))
+
+        motion_features = self.encoder(disp, corr)
+        motion_features = torch.cat([inp[0], motion_features], dim=1)
+        if self.args.n_gru_layers > 1:
+            net[0] = self.gru04(att[0], net[0], motion_features, interp(net[1], net[0]))
+
+        delta_disp, log_scale = self.disp_head(net[0])
+
+        # scale mask to balence gradients
+        mask = .25 * self.mask(net[0])
+
+        return net, mask, delta_disp, log_scale
