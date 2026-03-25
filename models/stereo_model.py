@@ -11,6 +11,7 @@ from losses.wavelet_loss import HFDTeacherBlock, CharbonnierLoss
 from losses.curvature_loss import CurvatureLoss
 from losses.pairwise_ordinal_loss import ordinal_loss as pairwise_ordinal_loss
 from losses.aligned_mtl import AlignedMTL
+from losses.beta_nll import BetaLaplacianNLLLoss
 from core.utils.utils import rescale_modulation
 class StereoDepthBaseModule(LightningModule):
     def __init__(self, opt):
@@ -119,8 +120,8 @@ class StereoDepthBaseModule(LightningModule):
             left_img  = left_img.repeat_interleave(3, axis=1)
             right_img  = right_img.repeat_interleave(3, axis=1)
 
-        predictions = self.disp_net(left_img, right_img,iters,psuedo_depth=psuedo_depth)
-        return predictions
+        init_disp, predictions, extra = self.disp_net(left_img, right_img,iters,psuedo_depth=psuedo_depth)
+        return init_disp, predictions, extra
 
     def inference_disp(self, left_img, right_img, psuedo_depth=None):
         B,C,H,W = left_img.shape
@@ -128,7 +129,7 @@ class StereoDepthBaseModule(LightningModule):
             left_img  = left_img.repeat_interleave(3, axis=1)
             right_img  = right_img.repeat_interleave(3, axis=1)
 
-        init_disp,pred_disp = self.disp_net(left_img, right_img, psuedo_depth=psuedo_depth)
+        init_disp, pred_disp, _ = self.disp_net(left_img, right_img, psuedo_depth=psuedo_depth)
         return pred_disp
 
     def training_step(self, batch, batch_idx):
@@ -143,9 +144,8 @@ class StereoDepthBaseModule(LightningModule):
         psuedo_depth = psuedo_depth.clamp(max=80)
 
         # network forward
-        outputs = self.forward(left_img, right_img,iters=self.train_iters,psuedo_depth=psuedo_depth.unsqueeze(1))
-        init_disp, predictions = outputs
-        loss_depth = self.get_losses(init_disp, predictions, disp_gt)
+        init_disp, predictions, log_scale_preds = self.forward(left_img, right_img,iters=self.train_iters,psuedo_depth=psuedo_depth.unsqueeze(1))
+        loss_depth = self.get_losses(init_disp, predictions, disp_gt, log_scale_preds=log_scale_preds)
 
         if self.pseudo_disparity:
             loss_reg = self.psuedo_disparity_loss(psuedo_disparity_gt, valid_regions_gt, predictions, init_disp, left_img)
@@ -287,13 +287,16 @@ class FoundationLighting(StereoDepthBaseModule):
         self.disp_net = model
         self.max_disp = opt.model.max_disp
         self.criterion = torch.nn.functional.smooth_l1_loss
+        self.beta_nll = opt.loss.get('beta_nll', False)
+        if self.beta_nll:
+            self.beta_nll_criterion = BetaLaplacianNLLLoss(beta=opt.loss.get('beta_nll_beta', 0.5))
 
 
 
 
     def get_optimize_param(self):
         unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
-                              "cost_agg", "corr_feature_att", "corr_stem"]
+                              "cost_agg", "corr_feature_att", "corr_stem", "uncertainty_head"]
 
         # 2. Iterate through the network and freeze/unfreeze based on name
         for name, param in self.disp_net.named_parameters():
@@ -321,13 +324,12 @@ class FoundationLighting(StereoDepthBaseModule):
             left_img  = left_img.repeat_interleave(3, axis=1)
             right_img  = right_img.repeat_interleave(3, axis=1)
 
-        outputs = self.disp_net(left_img, right_img,iters=self.valid_iters,psuedo_depth=psuedo_depth)
-        init_disp, pred_disp_pyramid = outputs
+        init_disp, pred_disp_pyramid, _ = self.disp_net(left_img, right_img,iters=self.valid_iters,psuedo_depth=psuedo_depth)
         return pred_disp_pyramid[-1]
 
 
     
-    def get_losses(self, disp_init_pred, disp_preds, disp_gt):
+    def get_losses(self, disp_init_pred, disp_preds, disp_gt, log_scale_preds=None):
 
 
         mask = (disp_gt < self.max_disp) & (disp_gt > 0)
@@ -353,9 +355,13 @@ class FoundationLighting(StereoDepthBaseModule):
             # Exponentially increasing weight: Early steps have low weight, final step has high weight
             i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
 
-            # Absolute difference (L1 Loss)
-            i_loss = (disp_preds[i][valid_bool] - disp_gt[valid_bool]).abs()
-            disp_loss += i_weight * i_loss.mean()
+            if self.beta_nll and log_scale_preds is not None:
+                i_loss = self.beta_nll_criterion(disp_preds[i], log_scale_preds[i], disp_gt, valid_bool)
+                disp_loss += i_weight * i_loss
+            else:
+                # Original L1 path
+                i_loss = (disp_preds[i][valid_bool] - disp_gt[valid_bool]).abs()
+                disp_loss += i_weight * i_loss.mean()
 
         return disp_loss
 

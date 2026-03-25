@@ -9,7 +9,7 @@ from dataloaders import build_dataset
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from pytorch_lightning.strategies import DDPStrategy
-from core.foundation_stereo import FoundationStereo as FoundationStereoOriginal
+from core.foundation_stereo import FoundationStereo as FoundationStereoOriginal, FoundationStereoBetaNLL
 from core.foundation_stereo_lbp import FoundationStereo as FoundationStereoLBP
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -47,9 +47,14 @@ if __name__ == '__main__':
     args_foundation_stereo = OmegaConf.create(cfg_foundation_stereo)
 
     model_type = cfg.model.get('model_type', 'foundation_stereo')
+    use_beta_nll = cfg.loss.get('beta_nll', False)
     if model_type == 'foundation_stereo_lbp':
         print(f"Initializing FoundationStereoLBP model...")
         model = FoundationStereoLBP(args_foundation_stereo)
+        strict_loading = False
+    elif use_beta_nll:
+        print(f"Initializing FoundationStereoBetaNLL model...")
+        model = FoundationStereoBetaNLL(args_foundation_stereo)
         strict_loading = False
     else:
         print(f"Initializing FoundationStereoOriginal model...")

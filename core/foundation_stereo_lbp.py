@@ -266,7 +266,7 @@ class FoundationStereo(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         if test_mode:
             return disp_up
 
-        return init_disp, disp_preds
+        return init_disp, disp_preds, None
 
 
     def run_hierachical(self, image1, image2, iters=12, test_mode=False, low_memory=False, small_ratio=0.5):

@@ -236,9 +236,21 @@ class FoundationStereo(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         b, c, h, w = features_left[0].shape
         coords = torch.arange(w, dtype=torch.float, device=init_disp.device).reshape(1,1,w,1).repeat(b, h, 1, 1)  # (B,H,W,1) Horizontal only
         disp = init_disp.float()
-        disp_preds = []
 
-        # GRUs iterations to update disparity (1/4 resolution)
+        disp_preds, extra = self.run_gru_iterations(
+            iters, disp, geo_fn, coords, net_list, inp_list, att, stem_2x, test_mode, low_memory
+        )
+
+        if test_mode:
+            return disp_preds[-1]
+
+        return init_disp, disp_preds, extra
+
+
+    def run_gru_iterations(self, iters, disp, geo_fn, coords,
+                           net_list, inp_list, att, stem_2x, test_mode, low_memory):
+        """GRU iteration loop. Override in subclass to add uncertainty prediction."""
+        disp_preds = []
         for itr in range(iters):
             disp = disp.detach()
             geo_feat = geo_fn(disp, coords, low_memory=low_memory)
@@ -249,15 +261,10 @@ class FoundationStereo(nn.Module, huggingface_hub.PyTorchModelHubMixin):
             if test_mode and itr < iters-1:
                 continue
 
-            # upsample predictions
             disp_up = self.upsample_disp(disp.float(), mask_feat_4.float(), stem_2x.float())
             disp_preds.append(disp_up)
 
-
-        if test_mode:
-            return disp_up
-
-        return init_disp, disp_preds
+        return disp_preds, None
 
 
     def run_hierachical(self, image1, image2, iters=12, test_mode=False, low_memory=False, small_ratio=0.5):
@@ -278,4 +285,39 @@ class FoundationStereo(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       disp = self.forward(image1, image2, iters=iters, test_mode=test_mode, low_memory=low_memory, init_disp=init_disp)
       disp = padder.unpad(disp.float())
       return disp
+
+
+class FoundationStereoBetaNLL(FoundationStereo):
+    """FoundationStereo with an uncertainty head for Beta-NLL loss."""
+
+    def __init__(self, args):
+        super().__init__(args)
+        from core.update import DispHead
+        self.uncertainty_head = DispHead(args.hidden_dims[0], 256, output_dim=1)
+        nn.init.zeros_(self.uncertainty_head.conv[-1].weight)
+        nn.init.constant_(self.uncertainty_head.conv[-1].bias, -2.0)
+
+    def run_gru_iterations(self, iters, disp, geo_fn, coords,
+                           net_list, inp_list, att, stem_2x, test_mode, low_memory):
+        disp_preds = []
+        log_scale_preds = []
+        for itr in range(iters):
+            disp = disp.detach()
+            geo_feat = geo_fn(disp, coords, low_memory=low_memory)
+            with autocast(enabled=self.args.mixed_precision):
+                net_list, mask_feat_4, delta_disp = self.update_block(net_list, inp_list, geo_feat, disp, att)
+
+            disp = disp + delta_disp.float()
+            if test_mode and itr < iters-1:
+                continue
+
+            disp_up = self.upsample_disp(disp.float(), mask_feat_4.float(), stem_2x.float())
+            disp_preds.append(disp_up)
+
+            log_scale = self.uncertainty_head(net_list[0])
+            log_scale = log_scale.float().clamp(-10.0, 10.0)
+            log_scale_up = F.interpolate(log_scale, scale_factor=4, mode='bilinear', align_corners=True)
+            log_scale_preds.append(log_scale_up)
+
+        return disp_preds, log_scale_preds
 
