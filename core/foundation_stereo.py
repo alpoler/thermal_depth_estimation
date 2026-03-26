@@ -316,7 +316,7 @@ class FoundationStereoBetaNLL(FoundationStereo):
 
             disp_preds.append(disp_up.float())
 
-            log_scale = log_scale.clamp(-5.0, 5.0)
+            log_scale = log_scale.clamp(-3.0, 3.0)
             log_scale_up = context_upsample(log_scale, spx_pred.detach()).unsqueeze(1)
             log_scale_preds.append(log_scale_up.float())
 

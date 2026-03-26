@@ -300,36 +300,25 @@ class FoundationLighting(StereoDepthBaseModule):
         unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
                               "cost_agg", "corr_feature_att", "corr_stem", "uncertainty_head"]
 
-        uncertainty_lr_scale = self.optim_opt.get('uncertainty_lr_scale', 0.1)
-
-        # 2. Iterate through the network and freeze/unfreeze based on name
-        main_params = []
-        uncertainty_params = []
+        # Iterate through the network and freeze/unfreeze based on name
+        trainable_params = []
         for name, param in self.disp_net.named_parameters():
             if any(keyword in name for keyword in unfrozed_keywords):
                 if "uncertainty_head" in name:
                     param.requires_grad = False
-                    uncertainty_params.append(param)
                 else:
                     param.requires_grad = True
-                    main_params.append(param)
+                trainable_params.append(param)
             else:
                 param.requires_grad = False
 
-        # 3. Pass trainable parameters with separate LR for uncertainty head
         optim_params = [
             {
-                'params': main_params,
+                'params': trainable_params,
                 'lr': self.optim_opt.learning_rate,
                 'weight_decay': self.optim_opt.weight_decay
             },
         ]
-        if uncertainty_params:
-            optim_params.append({
-                'params': uncertainty_params,
-                'lr': self.optim_opt.learning_rate * uncertainty_lr_scale,
-                'weight_decay': self.optim_opt.weight_decay
-            })
         return optim_params
 
     def inference_disp(self, left_img, right_img, psuedo_depth=None):
@@ -392,7 +381,9 @@ class FoundationLighting(StereoDepthBaseModule):
 
     def validation_epoch_end(self, outputs):
         super().validation_epoch_end(outputs)
-        if self.beta_nll and not self._beta_nll_initialized and self.current_epoch == self.warmup_beta_nll_epochs - 1:
+        if self.trainer.sanity_checking:
+            return
+        if self.beta_nll and not self._beta_nll_initialized and self.current_epoch >= self.warmup_beta_nll_epochs - 1:
             mean_epe = np.array([x['epe'] for x in outputs]).mean()
             self._initialize_uncertainty_head(mean_epe)
 

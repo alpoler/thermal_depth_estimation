@@ -1,10 +1,10 @@
 # training option
-out_dir: /data/VishwanathSaragadam/thermal_depth_exps
+out_dir: /mnt/mydisk/alper/thermal_depth_exps
 exp_name: exp_laplacian_beta_nll
 total_epochs: &e 80
 batch_lim_per_epoch: 5000
-imgs_per_gpu: &b 1 # per GPU batch size
-workers_per_gpu: 1
+imgs_per_gpu: &b 2 # per GPU batch size
+workers_per_gpu: 2
 
 dataset:
   list: ["MS2"] # ["MS2", "ViViD", ... ]
@@ -14,7 +14,7 @@ dataset:
 
   MS2:
     name: "MS2"
-    dataset_dir: "/data/VishwanathSaragadam/thermal"
+    dataset_dir: "/mnt/mydisk/thermal"
     available_modality: ['rgb', 'nir', 'thr']
     pseudo_disparity: True
     train:
@@ -86,7 +86,6 @@ optim:
   learning_rate: 5.0e-5
   weight_decay: 1.0e-5
   optimizer: 'AdamW'
-  uncertainty_lr_scale: 0.1
   scheduler: 'CosineAnnealWithWarmup'
   CosineAnnealWarm:
     T_0: 10
@@ -119,7 +118,7 @@ loss:
   pairwise_ordinal_n_pairs: 2500
   pairwise_ordinal_delta: 0.01
   beta_nll: True
-  beta_nll_weight: 0.5
-  warmup_beta_nll_epochs: 5
+  beta_nll_weight: 0.7
+  warmup_beta_nll_epochs: 1
   grad_method: 'aligned_mtl'  # 'none' or 'aligned_mtl'
   aligned_mtl_weights: [0.9, 0.1]  # [depth, regularization]
