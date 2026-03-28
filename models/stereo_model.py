@@ -7,6 +7,7 @@ from losses.stft_loss import STFTLoss
 from pytorch_lightning import LightningModule
 from metrics.eval_metric import compute_depth_errors, compute_disp_errors
 from utils.visualization import *
+from losses.dtcwt_loss import DTCWTSubbandLoss
 from losses.wavelet_loss import HFDTeacherBlock, CharbonnierLoss
 from losses.curvature_loss import CurvatureLoss
 from losses.pairwise_ordinal_loss import ordinal_loss as pairwise_ordinal_loss
@@ -43,6 +44,17 @@ class StereoDepthBaseModule(LightningModule):
         self.curvature_loss_weight = opt.loss.get('curvature_loss_weight', 1.0)
         if self.curvature_loss_on:
             self.curvature_criterion = CurvatureLoss(scales=3, use_log=False)
+        self.dtcwt_loss_on = opt.loss.get('dtcwt_loss', False)
+        self.dtcwt_loss_weight = opt.loss.get('dtcwt_loss_weight', 1.0)
+        if self.dtcwt_loss_on:
+            dtcwt_J = opt.loss.get('dtcwt_scales', 3)
+            dtcwt_alpha = opt.loss.get('dtcwt_alpha', 2.0)
+            dtcwt_levels = opt.loss.get('dtcwt_levels', None)
+            if dtcwt_levels is not None:
+                dtcwt_levels = [int(l) for l in dtcwt_levels]
+            self.dtcwt_criterion = DTCWTSubbandLoss(J=dtcwt_J, alpha=dtcwt_alpha, levels=dtcwt_levels)
+
+
         self.pairwise_ordinal_loss_on = opt.loss.get('pairwise_ordinal_loss', False)
         self.pairwise_ordinal_loss_weight = opt.loss.get('pairwise_ordinal_loss_weight', 1.0)
         self.pairwise_ordinal_n_pairs = opt.loss.get('pairwise_ordinal_n_pairs', 10000)
@@ -478,6 +490,18 @@ class FoundationLighting(StereoDepthBaseModule):
             curv_loss = self.weighted_sequence_loss(predictions, target_masked, curv_crit, gamma=0.9)
             disp_loss = disp_loss + self.curvature_loss_weight * curv_loss
             self.log('train/curvature_loss', curv_loss.detach(), prog_bar=False)
+
+        if self.dtcwt_loss_on:
+            target_masked = psuedo_disparity_gt.unsqueeze(1)
+
+            def dtcwt_crit(pred, target):
+                return self.dtcwt_criterion(pred, target)
+
+            dtcwt_loss = self.weighted_sequence_loss(predictions, target_masked, dtcwt_crit, gamma=0.9)
+            disp_loss = disp_loss + self.dtcwt_loss_weight * dtcwt_loss
+            self.log('train/dtcwt_loss', dtcwt_loss.detach(), prog_bar=False)
+
+
 
         if self.pairwise_ordinal_loss_on:
             target_masked = psuedo_disparity_gt.unsqueeze(1)
