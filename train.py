@@ -9,7 +9,7 @@ from dataloaders import build_dataset
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from pytorch_lightning.strategies import DDPStrategy
-from core.foundation_stereo import FoundationStereo as FoundationStereoOriginal, FoundationStereoBetaNLL
+from core.foundation_stereo import FoundationStereo as FoundationStereoOriginal, FoundationStereoFaithful
 from core.foundation_stereo_lbp import FoundationStereo as FoundationStereoLBP
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -23,9 +23,9 @@ def parse_args():
     parser.add_argument('--config',default="/home/akayabasi/thermal_depth_estimation/23-51-11/Base_Sup_Stereo_Depth.yaml", help='config file path')
     parser.add_argument('--out_dir' , type=str, default='checkpoints')
     parser.add_argument('--exp_name', type=str, default='test_', help='experiment name')
-    parser.add_argument('--num_gpus', type=int, default=2, help='number of gpus')
+    parser.add_argument('--num_gpus', type=int, default=3, help='number of gpus')
     parser.add_argument('--seed', type=int, default=1024)
-    parser.add_argument('--ckpt_path', type=str, default="/mnt/mydisk/alper/foundation_stereo_pretrained/model_best_bp2.pth",
+    parser.add_argument('--ckpt_path', type=str, default="/mnt/my_disk/alper/foundation_stereo_pretrained/model_best_bp2.pth",
                         help='pretrained checkpoint path to load')
     parser.add_argument('--resume', type=str, default=None, help='resume from checkpoint')
 
@@ -47,14 +47,14 @@ if __name__ == '__main__':
     args_foundation_stereo = OmegaConf.create(cfg_foundation_stereo)
 
     model_type = cfg.model.get('model_type', 'foundation_stereo')
-    use_beta_nll = cfg.loss.get('beta_nll', False)
+    use_faithful_loss = cfg.loss.get('faithful_loss', False)
     if model_type == 'foundation_stereo_lbp':
         print(f"Initializing FoundationStereoLBP model...")
         model = FoundationStereoLBP(args_foundation_stereo)
         strict_loading = False
-    elif use_beta_nll:
-        print(f"Initializing FoundationStereoBetaNLL model...")
-        model = FoundationStereoBetaNLL(args_foundation_stereo)
+    elif use_faithful_loss:
+        print(f"Initializing FoundationStereoFaithful model...")
+        model = FoundationStereoFaithful(args_foundation_stereo)
         strict_loading = False
     else:
         print(f"Initializing FoundationStereoOriginal model...")
