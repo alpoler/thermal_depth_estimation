@@ -11,7 +11,9 @@ from losses.wavelet_loss import HFDTeacherBlock, CharbonnierLoss
 from losses.curvature_loss import CurvatureLoss
 from losses.pairwise_ordinal_loss import ordinal_loss as pairwise_ordinal_loss
 from losses.aligned_mtl import AlignedMTL
+from losses.dtcwt_loss import DTCWTSubbandLoss
 from core.utils.utils import rescale_modulation
+
 class StereoDepthBaseModule(LightningModule):
     def __init__(self, opt):
         super().__init__()
@@ -50,7 +52,15 @@ class StereoDepthBaseModule(LightningModule):
         if self.use_aligned_mtl:
             self.aligned_mtl = AlignedMTL(weights=opt.loss.get('aligned_mtl_weights', [0.5, 0.5]))
             self.automatic_optimization = False
-
+        self.dtcwt_loss_on = opt.loss.get('dtcwt_loss', False)
+        self.dtcwt_loss_weight = opt.loss.get('dtcwt_loss_weight', 1.0)    
+        if self.dtcwt_loss_on:
+            dtcwt_J = opt.loss.get('dtcwt_scales', 3)
+            dtcwt_alpha = opt.loss.get('dtcwt_alpha', 2.0)
+            dtcwt_levels = opt.loss.get('dtcwt_levels', None)
+            if dtcwt_levels is not None:
+                dtcwt_levels = [int(l) for l in dtcwt_levels]
+            self.dtcwt_criterion = DTCWTSubbandLoss(J=dtcwt_J, alpha=dtcwt_alpha, levels=dtcwt_levels)
     def get_optimize_param(self):
         pass
     
@@ -293,7 +303,7 @@ class FoundationLighting(StereoDepthBaseModule):
 
     def get_optimize_param(self):
         unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
-                              "cost_agg", "corr_feature_att", "corr_stem"]
+                              "cost_agg", "corr_feature_att", "corr_stem","cnet.conv2","cnet.outputs04","cnet.outputs08","cnet.outpus16"]
 
         # 2. Iterate through the network and freeze/unfreeze based on name
         for name, param in self.disp_net.named_parameters():
@@ -415,6 +425,16 @@ class FoundationLighting(StereoDepthBaseModule):
 
             stft_seq_loss = self.weighted_sequence_loss(predictions, target_masked, stft_crit, gamma=0.9)
             disp_loss = disp_loss + stft_seq_loss
+        if self.dtcwt_loss_on:
+            target_masked = psuedo_disparity_gt.unsqueeze(1)
+
+            def dtcwt_crit(pred, target):
+                return self.dtcwt_criterion(pred, target)
+
+            dtcwt_loss = self.weighted_sequence_loss(predictions, target_masked, dtcwt_crit, gamma=0.9)
+            disp_loss = disp_loss + self.dtcwt_loss_weight * dtcwt_loss
+            self.log('train/dtcwt_loss', dtcwt_loss.detach(), prog_bar=False)    
+            
         if self.wavelet_loss_on:
             # 1. Init Disp (upsampled)
             target_masked = psuedo_disparity_gt.unsqueeze(1)
