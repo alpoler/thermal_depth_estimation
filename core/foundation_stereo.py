@@ -8,6 +8,7 @@
 
 
 import torch,pdb,logging,timm
+from functools import partial
 import torch.nn as nn
 import torch.nn.functional as F
 import sys,os
@@ -29,7 +30,7 @@ import time,huggingface_hub
 
 
 try:
-    autocast = torch.cuda.amp.autocast
+    autocast = partial(torch.amp.autocast, 'cuda')
 except:
     class autocast:
         def __init__(self, enabled):

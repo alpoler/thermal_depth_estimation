@@ -31,7 +31,7 @@ import time,huggingface_hub
 
 try:
     from functools import partial
-    autocast = partial(torch.cuda.amp.autocast, dtype=torch.bfloat16)
+    autocast = partial(torch.amp.autocast, 'cuda', dtype=torch.bfloat16)
 except:
     class autocast:
         def __init__(self, enabled):

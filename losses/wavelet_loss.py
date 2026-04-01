@@ -86,7 +86,7 @@ class HFDTeacherBlock(nn.Module):
         return M1, M2, M3
 
     def forward(self, x, masks=None):
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             # Ensure input is float32 for wavelet and sobel operations
             x = x.float()
             B, C, H, W = x.shape

@@ -37,7 +37,7 @@ class DTCWTSubbandLoss(nn.Module):
         Returns:
             Scalar loss (weighted smooth L1 over selected scales and subbands)
         """
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             pred = pred.float()
             target = target.float()
             _, yh_pred = self.dtcwt(pred)

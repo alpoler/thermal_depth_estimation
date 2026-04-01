@@ -13,6 +13,7 @@ from losses.pairwise_ordinal_loss import ordinal_loss as pairwise_ordinal_loss
 from losses.aligned_mtl import AlignedMTL
 from losses.dtcwt_loss import DTCWTSubbandLoss
 from core.utils.utils import rescale_modulation
+import robust_loss_pytorch.adaptive
 
 class StereoDepthBaseModule(LightningModule):
     def __init__(self, opt):
@@ -61,6 +62,11 @@ class StereoDepthBaseModule(LightningModule):
             if dtcwt_levels is not None:
                 dtcwt_levels = [int(l) for l in dtcwt_levels]
             self.dtcwt_criterion = DTCWTSubbandLoss(J=dtcwt_J, alpha=dtcwt_alpha, levels=dtcwt_levels)
+        self.robust_loss_on = opt.loss.get('robust_loss', False)
+        self.robust_loss_weight = opt.loss.get('robust_loss_weight', 1.0)
+        if self.robust_loss_on:
+            self.adaptive_loss = robust_loss_pytorch.adaptive.AdaptiveLossFunction(
+                num_dims=1, float_dtype=np.float32, device='cpu')
     def get_optimize_param(self):
         pass
     
@@ -70,6 +76,12 @@ class StereoDepthBaseModule(LightningModule):
         pass
     def configure_optimizers(self):
         optim_params = self.get_optimize_param()
+
+        if self.robust_loss_on:
+            optim_params.append({
+                'params': self.adaptive_loss.parameters(),
+                'lr': self.optim_opt.learning_rate,
+            })
 
         if self.optim_opt.optimizer == 'Adam' :
             optimizer = torch.optim.Adam(optim_params)
@@ -363,8 +375,12 @@ class FoundationLighting(StereoDepthBaseModule):
             # Exponentially increasing weight: Early steps have low weight, final step has high weight
             i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
 
-            # Absolute difference (L1 Loss)
-            i_loss = (disp_preds[i][valid_bool] - disp_gt[valid_bool]).abs()
+            if self.robust_loss_on:
+                residuals = (disp_preds[i][valid_bool] - disp_gt[valid_bool]).unsqueeze(-1)
+                i_loss = self.adaptive_loss.lossfun(residuals)
+            else:
+                # Absolute difference (L1 Loss)
+                i_loss = (disp_preds[i][valid_bool] - disp_gt[valid_bool]).abs()
             disp_loss += i_weight * i_loss.mean()
 
         return disp_loss
