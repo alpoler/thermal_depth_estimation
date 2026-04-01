@@ -1,9 +1,9 @@
 # training option
-out_dir: /mnt/mydisk/alper/thermal_depth_exps
+out_dir: /mnt/my_disk/alper/thermal_depth_exps
 exp_name: exp_aligned_mtl_curvature
 total_epochs: &e 80
 batch_lim_per_epoch: 5000
-imgs_per_gpu: &b 2 # per GPU batch size
+imgs_per_gpu: &b 4 # per GPU batch size
 workers_per_gpu: 2
 
 dataset:
@@ -14,7 +14,7 @@ dataset:
 
   MS2:
     name: "MS2"
-    dataset_dir: "/mnt/mydisk/thermal"
+    dataset_dir: "/mnt/my_disk/alper/thermal"
     available_modality: ['rgb', 'nir', 'thr']
     pseudo_disparity: True
     train:
@@ -111,11 +111,16 @@ loss:
   wavelet_loss: False
   topological_loss: False
   triplet_loss: False
-  curvature_loss: True
+  curvature_loss: False
   curvature_loss_weight: 1
   pairwise_ordinal_loss: False
   pairwise_ordinal_loss_weight: 1.0
   pairwise_ordinal_n_pairs: 2500
   pairwise_ordinal_delta: 0.01
-  grad_method: 'aligned_mtl'  # 'none' or 'aligned_mtl'
+  grad_method: 'none'  # 'none' or 'aligned_mtl'
   aligned_mtl_weights: [0.9, 0.1]  # [depth, regularization]
+  dtcwt_loss: True
+  dtcwt_loss_weight: 1.0
+  dtcwt_scales: 3
+  dtcwt_alpha: 2.0
+  dtcwt_levels: [1,2,3]
