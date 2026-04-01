@@ -1,10 +1,10 @@
 # training option
-out_dir: /mnt/my_disk/alper/thermal_depth_exps
-exp_name: exp_unfrozen_cnet
+out_dir: /data/VishwanathSaragadam/thermal_depth_exps
+exp_name: exp_unfrozen_cnet_wavelet_loss
 total_epochs: &e 80
 batch_lim_per_epoch: 5000
-imgs_per_gpu: &b 1 # per GPU batch size
-workers_per_gpu: 1
+imgs_per_gpu: &b 4 # per GPU batch size
+workers_per_gpu: 2
 
 dataset:
   list: ["MS2"] # ["MS2", "ViViD", ... ]
@@ -14,7 +14,7 @@ dataset:
 
   MS2:
     name: "MS2"
-    dataset_dir: "/mnt/my_disk/alper/thermal"
+    dataset_dir: "/data/VishwanathSaragadam/thermal"
     available_modality: ['rgb', 'nir', 'thr']
     pseudo_disparity: True
     train:
