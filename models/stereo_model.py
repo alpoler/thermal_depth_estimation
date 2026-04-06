@@ -310,16 +310,18 @@ class FoundationLighting(StereoDepthBaseModule):
         self.max_disp = opt.model.max_disp
         self.criterion = torch.nn.functional.smooth_l1_loss
 
-        # Epsilon scheduling for OT disp_init
-        self.eps_start = opt.model.get('ot_eps_start', 0.5)
-        self.eps_end = opt.model.get('ot_eps_end', 1.0)
+        # Epsilon scheduling for OT disp_init: eps_t = eps_end^(step/total_steps)
+        self.eps_end = opt.model.get('ot_eps_end', 0.5)
 
     def on_train_batch_start(self, batch, batch_idx):
-        if hasattr(self.disp_net, 'disp_init') and hasattr(self.disp_net.disp_init, 'epsilon'):
-            # global_step counts across all epochs, estimated_stepping_batches = max_epochs * steps_per_epoch
+        if hasattr(self.disp_net, 'disp_init') and hasattr(self.disp_net.disp_init, 'ot'):
             total_steps = self.trainer.estimated_stepping_batches
             t = self.global_step / max(total_steps - 1, 1)
-            self.disp_net.disp_init.epsilon = self.eps_start + t * (self.eps_end - self.eps_start)
+            eps = self.eps_end ** t
+            self.disp_net.disp_init.epsilon = eps
+            self.disp_net.disp_init.ot.eps = eps
+            if self.global_step % 100 == 0:
+                self.log('ot_epsilon', eps)
 
     def get_optimize_param(self):
         unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
