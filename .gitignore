@@ -16,3 +16,4 @@ Thumbs.db
 # Environment file
 thermal_env.txt
 thermal_env.yml
+predict_pair.py

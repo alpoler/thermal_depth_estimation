@@ -1,6 +1,6 @@
 # training option
 out_dir: /mnt/mydisk/alper/thermal_depth_exps
-exp_name: exp_robust_loss_wavelet_cnet
+exp_name: exp_optimal_transport
 total_epochs: &e 80
 batch_lim_per_epoch: 5000
 imgs_per_gpu: &b 2 # per GPU batch size
@@ -124,4 +124,4 @@ loss:
   dtcwt_scales: 3
   dtcwt_alpha: 2.0
   dtcwt_levels: [1,2,3]
-  robust_loss: True
+  robust_loss: False

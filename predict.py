@@ -105,6 +105,9 @@ if __name__ == '__main__':
         cfg_foundation_stereo['vit_size'] = 'vitl'
     for k in args.__dict__:
         cfg_foundation_stereo[k] = args.__dict__[k]
+    # Derive image_width from the training modality's train_size
+    train_modality = cfg.dataset[cfg.dataset.list[0]].train.modality
+    cfg_foundation_stereo['image_width'] = cfg.dataset[cfg.dataset.list[0]][train_modality].train_size[1]
     args_foundation_stereo = OmegaConf.create(cfg_foundation_stereo)
 
     # ---- Build backbone model (same logic as train.py) ----

@@ -44,6 +44,9 @@ if __name__ == '__main__':
         cfg_foundation_stereo['vit_size'] = 'vitl'
     for k in args.__dict__:
         cfg_foundation_stereo[k] = args.__dict__[k]
+    # Derive image_width from the training modality's train_size
+    train_modality = cfg.dataset[cfg.dataset.list[0]].train.modality
+    cfg_foundation_stereo['image_width'] = cfg.dataset[cfg.dataset.list[0]][train_modality].train_size[1]
     args_foundation_stereo = OmegaConf.create(cfg_foundation_stereo)
 
     model_type = cfg.model.get('model_type', 'foundation_stereo')
@@ -57,7 +60,15 @@ if __name__ == '__main__':
         strict_loading = True
 
     ckpt = torch.load(ckpt_dir)
-    model.load_state_dict(ckpt['model'], strict=strict_loading)
+    if strict_loading:
+        # Allow missing disp_init buffers (newly added, safe to re-initialize)
+        missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
+        if missing:
+            print(f"[INFO] Missing keys: {sorted(missing)}")
+        if unexpected:
+            print(f"[INFO] Unexpected keys: {sorted(unexpected)}")
+    else:
+        model.load_state_dict(ckpt['model'], strict=False)
     
     # show information
     print(f'Now training with {args.config}...')
