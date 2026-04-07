@@ -327,6 +327,11 @@ class FoundationLighting(StereoDepthBaseModule):
         unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
                               "cost_agg", "corr_feature_att", "corr_stem","cnet.conv2","cnet.outputs04","cnet.outputs08","cnet.outpus16"]
 
+        # Unfreeze dustbin_cost if using dustbin OT
+        from core.disp_init import DustbinOTDisparityInit
+        if isinstance(self.disp_net.disp_init, DustbinOTDisparityInit):
+            unfrozed_keywords.append("disp_init")
+
         # 2. Iterate through the network and freeze/unfreeze based on name
         for name, param in self.disp_net.named_parameters():
             if any(keyword in name for keyword in unfrozed_keywords):

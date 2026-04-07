@@ -1,10 +1,13 @@
-"""Disparity initialization via softmax or unbalanced optimal transport.
+"""Disparity initialization via softmax, unbalanced OT, or dustbin OT.
 
 Unbalanced Sinkhorn with Dykstra-like recentering (Séjourné et al. 2022).
 Constants derived from tau:
     kappa = (1 - tau) / 2
     xi    = (1 - tau) / (1 + tau)
     rho   = eps * tau / (1 - tau)
+
+Dustbin OT: balanced Sinkhorn (tau=1, no recentering) with an extra
+dustbin row/column that absorbs unmatched mass.
 """
 
 from __future__ import annotations
@@ -40,80 +43,65 @@ class SoftmaxDisparityInit(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Unbalanced OT solver
+# Base OT solver
 # ---------------------------------------------------------------------------
 
-class UnbalancedOT(nn.Module):
-    r"""Log-domain unbalanced Sinkhorn with Dykstra recentering.
+class BaseOT(nn.Module):
+    """Base class for log-domain Sinkhorn solvers.
 
-    Each iteration does a damped (tau) Sinkhorn half-step then applies
-    kappa / xi corrections that recenter the potentials.
+    Provides shared primitives and the forward loop.
+
+    Subclasses must implement:
+        _build_marginals(W, D, col_counts) -> (log_a, log_b)
+        _one_iter(C, f, g) -> (f, g)
     """
 
     def __init__(self, W: int, C: int, num_iter: int = 10,
-                 tau: float = 0.95, epsilon: float = 1.0):
+                 epsilon: float = 1.0):
         super().__init__()
         self.num_iter = num_iter
-        self.tau = tau
         self.eps = epsilon
 
-        # Derived constants
-        self.kappa = (1.0 - tau) / 2.0
-        self.xi = (1.0 - tau) / (1.0 + tau)
-
-        log_a, log_b = self._build_marginals(W, C - W)
+        D = C - W + 1
+        col_counts = self._compute_col_counts(W, D)
+        log_a, log_b = self._build_marginals(W, D, col_counts)
         self.register_buffer("log_a", log_a)
         self.register_buffer("log_b", log_b)
 
     @staticmethod
-    def _build_marginals(W: int, D: int):
-        """Build marginals proportional to valid-entry counts.
+    def _compute_col_counts(W: int, D: int) -> Tensor:
+        """Count valid rows per column.
 
-        Row j has exactly D valid columns -> uniform row marginal.
-
-        Column c has valid rows j where 0 <= j-c+D < D  and  0 <= j < W,
-        i.e.  max(0, c-D) <= j <= min(W-1, c-1):
-            c < D     :  min(c, W) valid rows
-            D <= c < W:  D valid rows
-            c >= W    :  max(0, W + D - c) valid rows
+        Scatter uses c = j - d + (D-1), valid disparities d in [0, D-1].
+        Column c maps to right-pixel coordinate c - (D-1).
+        Valid rows for column c: max(0, c - (D-1)) <= j <= min(W-1, c).
+        Last reachable column: (W-1) - 0 + (D-1) = W+D-2 = C-1.
         """
-        C = D + W
-
-        # Row marginal: uniform (each row has D valid entries)
-        log_a = torch.full((W,), -math.log(W))
-
-        # Column marginal: proportional to valid entry count
+        C = D + W - 1
         col_counts = torch.zeros(C)
         for c in range(C):
-            lo = max(0, c - D)
-            hi = min(W - 1, c - 1)
+            lo = max(0, c - (D - 1))
+            hi = min(W - 1, c)
             col_counts[c] = max(0, hi - lo + 1)
+        return col_counts.clamp(min=0.5)
 
-        # Clamp to avoid log(0) -- columns with 0 valid entries get tiny mass
-        col_counts = col_counts.clamp(min=0.5)
-        col_marginal = col_counts / col_counts.sum()
-        log_b = col_marginal.log()
+    @staticmethod
+    def _build_marginals(W: int, D: int, col_counts: Tensor):
+        raise NotImplementedError
 
-        return log_a, log_b
+    def _one_iter(self, C: Tensor, f: Tensor, g: Tensor):
+        raise NotImplementedError
 
     # ------------------------------------------------------------------
-    # Core primitives
+    # Common primitives
     # ------------------------------------------------------------------
-
-    @property
-    def rho(self) -> float:
-        """KL penalty  rho = eps * tau / (1 - tau)."""
-        return self.eps * self.tau / (1.0 - self.tau)
 
     def _softmax(self, C: Tensor, f: Tensor, g: Tensor,
                  axis: int) -> Tensor:
         """Stabilised log-sum-exp of the Gibbs kernel.
 
-        S = (C - f[..., None] - g[..., None, :]) / eps
-        return eps * logsumexp(-S, dim=axis)
-
-        axis = -1  ->  reduce over columns  ->  shape like f  (B,H,W)
-        axis = -2  ->  reduce over rows     ->  shape like g  (B,H,C)
+        axis = -1  ->  reduce over columns  ->  shape like f
+        axis = -2  ->  reduce over rows     ->  shape like g
         """
         S = (C - f.unsqueeze(-1) - g.unsqueeze(-2)) / self.eps
         return self.eps * torch.logsumexp(-S, dim=axis)
@@ -128,52 +116,10 @@ class UnbalancedOT(nn.Module):
 
     def _sinkhorn_update(self, C: Tensor, f: Tensor, g: Tensor,
                          axis: int, log_marginal: Tensor) -> Tensor:
-        """One balanced Sinkhorn half-step (before tau damping)."""
+        """One balanced Sinkhorn half-step."""
         app_lse = self._lse_kernel(C, f, g, axis)
         return self.eps * log_marginal - torch.where(
             torch.isfinite(app_lse), app_lse, torch.zeros_like(app_lse))
-
-    def _smin(self, h: Tensor, log_marginal: Tensor) -> Tensor:
-        """Soft-min:  smin(h, c) = -rho * logsumexp(-h/rho + log c, dim=-1)."""
-        rho = self.rho
-        return -rho * torch.logsumexp(-h / rho + log_marginal, dim=-1)
-
-    # ------------------------------------------------------------------
-    # Single iteration (Sinkhorn + Dykstra recentering)
-    # ------------------------------------------------------------------
-
-    def _one_iter(self, C: Tensor, f: Tensor, g: Tensor):
-        """One full iteration: update g then f, each with recentering.
-
-        Shapes
-        ------
-        C : (B, H, W, C_cols)   cost matrix
-        f : (B, H, W)           row potentials
-        g : (B, H, C_cols)      column potentials
-        """
-        old_f = f
-
-        # ---- g update (reduce over rows, axis=-2) --------------------
-        new_g = self.tau * self._sinkhorn_update(
-            C, old_f, g, axis=-2, log_marginal=self.log_b)
-
-        # Dykstra recentering for g
-        new_g = new_g - self.kappa * self._smin(old_f, self.log_a).unsqueeze(-1)
-        new_g = new_g + self.xi * self._smin(new_g, self.log_b).unsqueeze(-1)
-
-        # ---- f update (reduce over cols, axis=-1, using new_g) -------
-        new_f = self.tau * self._sinkhorn_update(
-            C, f, new_g, axis=-1, log_marginal=self.log_a)
-
-        # Dykstra recentering for f
-        new_f = new_f - self.kappa * self._smin(new_g, self.log_b).unsqueeze(-1)
-        new_f = new_f + self.xi * self._smin(new_f, self.log_a).unsqueeze(-1)
-
-        return new_f, new_g
-
-    # ------------------------------------------------------------------
-    # Solve
-    # ------------------------------------------------------------------
 
     def _init_potentials(self, C: Tensor):
         B, H, W, C_cols = C.shape
@@ -182,12 +128,12 @@ class UnbalancedOT(nn.Module):
         return f, g
 
     def forward(self, C: Tensor) -> Tensor:
-        """Run unbalanced Sinkhorn and return transport plan P.
+        """Run Sinkhorn and return transport plan P.
 
         Args:
-            C: (B, H, W, C_cols) cost matrix (lower = better).
+            C: (B, H, rows, cols) cost matrix (lower = better).
         Returns:
-            P: (B, H, W, C_cols) transport plan.
+            P: (B, H, rows, cols) transport plan.
         """
         f, g = self._init_potentials(C)
 
@@ -200,38 +146,113 @@ class UnbalancedOT(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# OT disparity initialisation
+# Unbalanced OT solver
 # ---------------------------------------------------------------------------
 
-class OTDisparityInit(nn.Module):
-    """Unbalanced OT disparity initialization.
+class UnbalancedOT(BaseOT):
+    r"""Log-domain unbalanced Sinkhorn with Dykstra recentering."""
+
+    def __init__(self, W: int, C: int, num_iter: int = 10,
+                 tau: float = 0.95, epsilon: float = 1.0):
+        self.tau = tau
+        self.kappa = (1.0 - tau) / 2.0
+        self.xi = (1.0 - tau) / (1.0 + tau)
+        super().__init__(W, C, num_iter=num_iter, epsilon=epsilon)
+
+    @staticmethod
+    def _build_marginals(W: int, D: int, col_counts: Tensor):
+        log_a = torch.full((W,), -math.log(W))
+        col_marginal = col_counts / col_counts.sum()
+        log_b = col_marginal.log()
+        return log_a, log_b
+
+    @property
+    def rho(self) -> float:
+        """KL penalty  rho = eps * tau / (1 - tau)."""
+        return self.eps * self.tau / (1.0 - self.tau)
+
+    def _smin(self, h: Tensor, log_marginal: Tensor) -> Tensor:
+        rho = self.rho
+        return -rho * torch.logsumexp(-h / rho + log_marginal, dim=-1)
+
+    def _one_iter(self, C: Tensor, f: Tensor, g: Tensor):
+        old_f = f
+
+        # g update (reduce over rows) with tau damping + recentering
+        new_g = self.tau * self._sinkhorn_update(
+            C, old_f, g, axis=-2, log_marginal=self.log_b)
+        new_g = new_g - self.kappa * self._smin(old_f, self.log_a).unsqueeze(-1)
+        new_g = new_g + self.xi * self._smin(new_g, self.log_b).unsqueeze(-1)
+
+        # f update (reduce over cols) with tau damping + recentering
+        new_f = self.tau * self._sinkhorn_update(
+            C, f, new_g, axis=-1, log_marginal=self.log_a)
+        new_f = new_f - self.kappa * self._smin(new_g, self.log_b).unsqueeze(-1)
+        new_f = new_f + self.xi * self._smin(new_f, self.log_a).unsqueeze(-1)
+
+        return new_f, new_g
+
+
+# ---------------------------------------------------------------------------
+# Dustbin OT solver (balanced Sinkhorn, tau=1, no recentering)
+# ---------------------------------------------------------------------------
+
+class DustbinOT(BaseOT):
+    """Balanced Sinkhorn (tau=1, no recentering) with dustbin.
+
+    With tau=1: kappa=0, xi=0, so recentering vanishes and tau*update = update.
+    Uses the same _sinkhorn_update from BaseOT without modification.
+    """
+
+    @staticmethod
+    def _build_marginals(W: int, D: int, col_counts: Tensor):
+        C = D + W - 1
+        col_real = col_counts / col_counts.sum() * C
+
+        # Append dustbin
+        row_marginal = torch.cat([torch.ones(W), torch.tensor([C])])
+        col_marginal = torch.cat([col_real, torch.tensor([W])])
+
+        row_marginal = row_marginal / row_marginal.sum()
+        col_marginal = col_marginal / col_marginal.sum()
+
+        return row_marginal.log(), col_marginal.log()
+
+    def _one_iter(self, C: Tensor, f: Tensor, g: Tensor):
+        # Balanced: tau=1, no recentering
+        new_g = self._sinkhorn_update(C, f, g, axis=-2, log_marginal=self.log_b)
+        new_f = self._sinkhorn_update(C, f, new_g, axis=-1, log_marginal=self.log_a)
+        return new_f, new_g
+
+
+# ---------------------------------------------------------------------------
+# Base OT disparity initialisation
+# ---------------------------------------------------------------------------
+
+class BaseOTDisparityInit(nn.Module):
+    """Base class for OT-based disparity initialization.
 
     Cost matrix  W x C  where  C = D + W :
         Row j  = left pixel (0..W-1).
-        Col c  = right pixel coordinate  c - D.
-        Valid column for (j, d):  c = j - d + D.
+        Col c  = right pixel coordinate  c - (D-1).
+        Valid column for (j, d):  c = j - d + (D-1).
+
+    Subclasses must set self.ot in __init__ and may override
+    _augment_cost and _extract_plan.
     """
 
-    def __init__(self, max_disp: int, image_width: int,
-                 ot_iter: int = 10, epsilon: float = 1.0,
-                 tau: float = 0.95):
+    def __init__(self, max_disp: int, image_width: int):
         super().__init__()
         self.max_disp = max_disp
-        self.epsilon = epsilon
 
         W = image_width // 4
         self.W = W
-        self.C = max_disp + W
+        self.C = max_disp + W - 1
 
-        self.ot = UnbalancedOT(W, self.C, num_iter=ot_iter,
-                               tau=tau, epsilon=epsilon)
-
-        # Scatter indices: col[d][j] = j - d + max_disp
+        # Scatter indices: col[d][j] = j - d + (max_disp - 1)
         j = torch.arange(W)
-        col_indices = torch.stack([j - d + max_disp for d in range(max_disp)])
+        col_indices = torch.stack([j - d + (max_disp - 1) for d in range(max_disp)])
         self.register_buffer("_col_idx", col_indices)  # (D, W)
-
-    # ----- score -> cost matrix ----------------------------------------
 
     def _scatter_to_cost(self, scores: Tensor) -> Tensor:
         """(B, D, H, W) similarity scores -> (B, H, W, C) cost = -scores."""
@@ -243,11 +264,18 @@ class OTDisparityInit(nn.Module):
             cost[:, :, j_idx, col] = -scores[:, d, :, :]
         return cost
 
-    # ----- transport plan -> disparity ---------------------------------
+    def _augment_cost(self, cost: Tensor) -> Tensor:
+        """Hook for subclasses to augment cost (e.g. add dustbin)."""
+        return cost
+
+    def _extract_plan(self, P: Tensor) -> Tensor:
+        """Hook for subclasses to extract relevant part of P."""
+        return P
 
     def _plan_to_disparity(self, P: Tensor, D: int) -> Tensor:
+        P = self._extract_plan(P)
         device, dtype = P.device, P.dtype
-        right = torch.arange(self.C, device=device, dtype=dtype) - D
+        right = torch.arange(self.C, device=device, dtype=dtype) - (D - 1)
         left = torch.arange(self.W, device=device, dtype=dtype)
         disp_map = left.view(1, 1, -1, 1) - right.view(1, 1, 1, -1)
 
@@ -257,13 +285,64 @@ class OTDisparityInit(nn.Module):
         disp = disp.squeeze(-1).unsqueeze(1)
         return disp
 
-    # ----- forward ----------------------------------------------------
-
     def forward(self, scores: Tensor) -> Tensor:
         B, D, H, W = scores.shape
-        C = self._scatter_to_cost(scores)
-        P = self.ot(C)
+        cost = self._scatter_to_cost(scores)
+        cost = self._augment_cost(cost)
+        P = self.ot(cost)
         return self._plan_to_disparity(P, D)
+
+
+# ---------------------------------------------------------------------------
+# Unbalanced OT disparity initialisation
+# ---------------------------------------------------------------------------
+
+class OTDisparityInit(BaseOTDisparityInit):
+    """Unbalanced OT disparity initialization."""
+
+    def __init__(self, max_disp: int, image_width: int,
+                 ot_iter: int = 10, epsilon: float = 1.0,
+                 tau: float = 0.95):
+        super().__init__(max_disp, image_width)
+        self.epsilon = epsilon
+        self.ot = UnbalancedOT(self.W, self.C, num_iter=ot_iter,
+                               tau=tau, epsilon=epsilon)
+
+
+# ---------------------------------------------------------------------------
+# Dustbin OT disparity initialisation
+# ---------------------------------------------------------------------------
+
+class DustbinOTDisparityInit(BaseOTDisparityInit):
+    """Balanced OT with learned dustbin cost."""
+
+    def __init__(self, max_disp: int, image_width: int,
+                 ot_iter: int = 10, epsilon: float = 1.0):
+        super().__init__(max_disp, image_width)
+        self.epsilon = epsilon
+        self.ot = DustbinOT(self.W, self.C, num_iter=ot_iter,
+                            epsilon=epsilon)
+        self.dustbin_cost = nn.Parameter(torch.tensor(1.0))
+
+    def _augment_cost(self, cost: Tensor) -> Tensor:
+        z = self.dustbin_cost
+        W, C = self.W, self.C
+
+        # Pad: right column and bottom row
+        cost = F.pad(cost, (0, 1, 0, 1), value=0)
+
+        # Fill dustbin column: real rows -> dustbin col
+        cost[:, :, :W, -1] = z
+        # Fill dustbin row: dustbin row -> real cols
+        cost[:, :, -1, :C] = z
+        # Corner: dustbin <-> dustbin = 0 (free self-match)
+        cost[:, :, -1, -1] = 0
+
+        return cost
+
+    def _extract_plan(self, P: Tensor) -> Tensor:
+        """Strip dustbin row and column."""
+        return P[:, :, :self.W, :self.C]
 
 
 # ---------------------------------------------------------------------------
@@ -283,5 +362,12 @@ def build_disp_init(args) -> nn.Module:
             ot_iter=getattr(args, "ot_iter", 20),
             epsilon=getattr(args, "ot_epsilon", 1.0),
             tau=getattr(args, "ot_tau", 0.95),
+        )
+    if method == "ot_dustbin":
+        return DustbinOTDisparityInit(
+            max_disp=max_disp,
+            image_width=args.image_width,
+            ot_iter=getattr(args, "ot_iter", 20),
+            epsilon=getattr(args, "ot_epsilon", 1.0),
         )
     raise ValueError(f"Unknown disp_init method: {method}")
