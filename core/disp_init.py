@@ -57,14 +57,15 @@ class BaseOT(nn.Module):
     """
 
     def __init__(self, W: int, C: int, num_iter: int = 10,
-                 epsilon: float = 1.0):
+                 epsilon: float = 1.0, occ_frac: float = 0.0):
         super().__init__()
         self.num_iter = num_iter
         self.eps = epsilon
+        self.occ_frac = occ_frac
 
         D = C - W + 1
         col_counts = self._compute_col_counts(W, D)
-        log_a, log_b = self._build_marginals(W, D, col_counts)
+        log_a, log_b = self._build_marginals(W, D, col_counts, occ_frac)
         self.register_buffer("log_a", log_a)
         self.register_buffer("log_b", log_b)
 
@@ -86,7 +87,7 @@ class BaseOT(nn.Module):
         return col_counts.clamp(min=0.5)
 
     @staticmethod
-    def _build_marginals(W: int, D: int, col_counts: Tensor):
+    def _build_marginals(W: int, D: int, col_counts: Tensor, occ_frac: float):
         raise NotImplementedError
 
     def _one_iter(self, C: Tensor, f: Tensor, g: Tensor):
@@ -160,7 +161,7 @@ class UnbalancedOT(BaseOT):
         super().__init__(W, C, num_iter=num_iter, epsilon=epsilon)
 
     @staticmethod
-    def _build_marginals(W: int, D: int, col_counts: Tensor):
+    def _build_marginals(W: int, D: int, col_counts: Tensor, occ_frac: float):
         log_a = torch.full((W,), -math.log(W))
         col_marginal = col_counts / col_counts.sum()
         log_b = col_marginal.log()
@@ -198,25 +199,33 @@ class UnbalancedOT(BaseOT):
 # ---------------------------------------------------------------------------
 
 class DustbinOT(BaseOT):
-    """Balanced Sinkhorn (tau=1, no recentering) with dustbin.
+    """Balanced Sinkhorn (tau=1, no recentering) with dustbin column only.
 
-    With tau=1: kappa=0, xi=0, so recentering vanishes and tau*update = update.
-    Uses the same _sinkhorn_update from BaseOT without modification.
+    No dustbin row — out-of-frame occlusion is already modeled by the
+    left-padding columns.  Only a single dustbin column is appended for
+    within-frame occlusion.
+
+    occ_frac controls the fixed fraction of row mass allocated to dustbin.
     """
 
+    def __init__(self, W: int, C: int, num_iter: int = 10,
+                 epsilon: float = 1.0, occ_frac: float = 0.1):
+        super().__init__(W, C, num_iter=num_iter, epsilon=epsilon,
+                         occ_frac=occ_frac)
+
     @staticmethod
-    def _build_marginals(W: int, D: int, col_counts: Tensor):
+    def _build_marginals(W: int, D: int, col_counts: Tensor, occ_frac: float):
         C = D + W - 1
-        col_real = col_counts / col_counts.sum() * C
+        # Row marginal: uniform over W (no dustbin row)
+        log_a = torch.full((W,), -math.log(W))
 
-        # Append dustbin
-        row_marginal = torch.cat([torch.ones(W), torch.tensor([C])])
-        col_marginal = torch.cat([col_real, torch.tensor([W])])
+        # Col marginal: col_counts-weighted real cols get (1 - occ_frac),
+        # dustbin col gets occ_frac
+        col_real = col_counts / col_counts.sum() * (1.0 - occ_frac)
+        col_marginal = torch.cat([col_real, torch.tensor([occ_frac])])
+        log_b = col_marginal.log()
 
-        row_marginal = row_marginal / row_marginal.sum()
-        col_marginal = col_marginal / col_marginal.sum()
-
-        return row_marginal.log(), col_marginal.log()
+        return log_a, log_b
 
     def _one_iter(self, C: Tensor, f: Tensor, g: Tensor):
         # Balanced: tau=1, no recentering
@@ -314,35 +323,42 @@ class OTDisparityInit(BaseOTDisparityInit):
 # ---------------------------------------------------------------------------
 
 class DustbinOTDisparityInit(BaseOTDisparityInit):
-    """Balanced OT with learned dustbin cost."""
+    """Balanced OT with dustbin column only (no dustbin row).
+
+    Dustbin cost per pixel is derived from two cues:
+      - energy (logsumexp of scores): overall match confidence
+      - margin (top1 - top2 scores): match uniqueness
+    High energy + high margin = confident unique match = high occ cost.
+    Low energy or low margin = ambiguous/uncertain = low occ cost (easy to occlude).
+    """
 
     def __init__(self, max_disp: int, image_width: int,
-                 ot_iter: int = 10, epsilon: float = 1.0):
+                 ot_iter: int = 10, epsilon: float = 1.0,
+                 occ_frac: float = 0.1):
         super().__init__(max_disp, image_width)
         self.epsilon = epsilon
         self.ot = DustbinOT(self.W, self.C, num_iter=ot_iter,
-                            epsilon=epsilon)
-        self.dustbin_cost = nn.Parameter(torch.tensor(1.0))
+                            epsilon=epsilon, occ_frac=occ_frac)
+        self.occ_head = nn.Linear(2, 1)
 
-    def _augment_cost(self, cost: Tensor) -> Tensor:
-        z = self.dustbin_cost
-        W, C = self.W, self.C
+    def forward(self, scores: Tensor) -> Tensor:
+        B, D, H, W = scores.shape
 
-        # Pad: right column and bottom row
-        cost = F.pad(cost, (0, 1, 0, 1), value=0)
+        energy = torch.logsumexp(scores, dim=1)            # (B, H, W)
+        top2 = scores.topk(2, dim=1).values                # (B, 2, H, W)
+        margin = top2[:, 0] - top2[:, 1]                   # (B, H, W)
 
-        # Fill dustbin column: real rows -> dustbin col
-        cost[:, :, :W, -1] = z
-        # Fill dustbin row: dustbin row -> real cols
-        cost[:, :, -1, :C] = z
-        # Corner: dustbin <-> dustbin = 0 (free self-match)
-        cost[:, :, -1, -1] = 0
+        feats = torch.stack([energy, margin], dim=-1)      # (B, H, W, 2)
+        dustbin_cost = -self.occ_head(feats)               # (B, H, W, 1)
 
-        return cost
+        cost = self._scatter_to_cost(scores)
+        cost = torch.cat([cost, dustbin_cost], dim=-1)      # (B, H, W, C+1)
+        P = self.ot(cost)
+        return self._plan_to_disparity(P, D)
 
     def _extract_plan(self, P: Tensor) -> Tensor:
-        """Strip dustbin row and column."""
-        return P[:, :, :self.W, :self.C]
+        """Strip dustbin column."""
+        return P[:, :, :, :self.C]
 
 
 # ---------------------------------------------------------------------------
@@ -369,5 +385,6 @@ def build_disp_init(args) -> nn.Module:
             image_width=args.image_width,
             ot_iter=getattr(args, "ot_iter", 20),
             epsilon=getattr(args, "ot_epsilon", 1.0),
+            occ_frac=getattr(args, "ot_occ_frac", 0.1),
         )
     raise ValueError(f"Unknown disp_init method: {method}")

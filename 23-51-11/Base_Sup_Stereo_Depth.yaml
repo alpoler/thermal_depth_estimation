@@ -1,6 +1,6 @@
 # training option
 out_dir: /mnt/my_disk/alper/thermal_depth_exps
-exp_name: exp_optimal_transport_unbalanced
+exp_name: exp_dustbin_ot
 total_epochs: &e 80
 batch_lim_per_epoch: 5000
 imgs_per_gpu: &b 1 # per GPU batch size
