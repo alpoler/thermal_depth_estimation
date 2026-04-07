@@ -1,3 +1,4 @@
+import gc
 import os
 import os.path as osp
 from argparse import ArgumentParser

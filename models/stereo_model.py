@@ -325,7 +325,7 @@ class FoundationLighting(StereoDepthBaseModule):
 
     def get_optimize_param(self):
         unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
-                              "cost_agg", "corr_feature_att", "corr_stem","cnet.conv2","cnet.outputs04","cnet.outputs08","cnet.outpus16","classifier"]
+                              "cost_agg", "corr_feature_att", "corr_stem","cnet.conv2","cnet.outputs04","cnet.outputs08","cnet.outpus16"]
 
         # 2. Iterate through the network and freeze/unfreeze based on name
         for name, param in self.disp_net.named_parameters():

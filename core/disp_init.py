@@ -61,10 +61,40 @@ class UnbalancedOT(nn.Module):
         self.kappa = (1.0 - tau) / 2.0
         self.xi = (1.0 - tau) / (1.0 + tau)
 
-        # Uniform log-marginals: each row gets 1/W, each col gets 1/C
-        # Row marginals: 1/W each, col marginals: 1/(W+C) each
-        self.register_buffer("log_a", torch.full((W,), -math.log(W)))
-        self.register_buffer("log_b", torch.full((C,), -math.log(C)))
+        log_a, log_b = self._build_marginals(W, C - W)
+        self.register_buffer("log_a", log_a)
+        self.register_buffer("log_b", log_b)
+
+    @staticmethod
+    def _build_marginals(W: int, D: int):
+        """Build marginals proportional to valid-entry counts.
+
+        Row j has exactly D valid columns -> uniform row marginal.
+
+        Column c has valid rows j where 0 <= j-c+D < D  and  0 <= j < W,
+        i.e.  max(0, c-D) <= j <= min(W-1, c-1):
+            c < D     :  min(c, W) valid rows
+            D <= c < W:  D valid rows
+            c >= W    :  max(0, W + D - c) valid rows
+        """
+        C = D + W
+
+        # Row marginal: uniform (each row has D valid entries)
+        log_a = torch.full((W,), -math.log(W))
+
+        # Column marginal: proportional to valid entry count
+        col_counts = torch.zeros(C)
+        for c in range(C):
+            lo = max(0, c - D)
+            hi = min(W - 1, c - 1)
+            col_counts[c] = max(0, hi - lo + 1)
+
+        # Clamp to avoid log(0) -- columns with 0 valid entries get tiny mass
+        col_counts = col_counts.clamp(min=0.5)
+        col_marginal = col_counts / col_counts.sum()
+        log_b = col_marginal.log()
+
+        return log_a, log_b
 
     # ------------------------------------------------------------------
     # Core primitives
@@ -225,8 +255,6 @@ class OTDisparityInit(nn.Module):
         disp = (P * disp_map).sum(dim=-1, keepdim=True) / mass
 
         disp = disp.squeeze(-1).unsqueeze(1)
-        self.conf = P.max(dim=-1).values.unsqueeze(1)
-        self.occ = mass.squeeze(-1).unsqueeze(1)
         return disp
 
     # ----- forward ----------------------------------------------------

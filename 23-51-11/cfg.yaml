@@ -37,4 +37,4 @@ modulation_alg: "sigmoid"
 model_type: "foundation_stereo"
 disp_init: "ot"  # "softmax" or "ot"
 ot_iter: 20           # Sinkhorn iterations (only used when disp_init: "ot")
-ot_tau: 0.9
+ot_tau: 0.7
