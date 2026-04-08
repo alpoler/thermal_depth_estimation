@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument('--config',default="/home/akayabasi/thermal_depth_estimation/23-51-11/Base_Sup_Stereo_Depth.yaml", help='config file path')
     parser.add_argument('--out_dir' , type=str, default='checkpoints')
     parser.add_argument('--exp_name', type=str, default='test_', help='experiment name')
-    parser.add_argument('--num_gpus', type=int, default=3, help='number of gpus')
+    parser.add_argument('--num_gpus', type=int, default=2, help='number of gpus')
     parser.add_argument('--seed', type=int, default=1024)
     parser.add_argument('--ckpt_path', type=str, default="/mnt/my_disk/alper/foundation_stereo_pretrained/model_best_bp2.pth",
                         help='pretrained checkpoint path to load')

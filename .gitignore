@@ -17,3 +17,4 @@ Thumbs.db
 thermal_env.txt
 thermal_env.yml
 predict_pair.py
+predict_and_calibrate.py

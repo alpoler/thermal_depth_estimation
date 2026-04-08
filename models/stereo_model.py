@@ -325,7 +325,7 @@ class FoundationLighting(StereoDepthBaseModule):
 
     def get_optimize_param(self):
         unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
-                              "cost_agg", "corr_feature_att", "corr_stem","cnet.conv2","cnet.outputs04","cnet.outputs08","cnet.outpus16"]
+                              "cost_agg", "corr_feature_att", "corr_stem","cnet.conv2","cnet.outputs04","cnet.outputs08","cnet.outpus16","classifier"]
 
         # Unfreeze dustbin_cost if using dustbin OT
         from core.disp_init import DustbinOTDisparityInit
@@ -338,12 +338,12 @@ class FoundationLighting(StereoDepthBaseModule):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
-        
+
         # 3. Pass ONLY the trainable parameters (requires_grad=True) to the optimizer
         optim_params = [
             {
-                'params': filter(lambda p: p.requires_grad, self.disp_net.parameters()), 
-                'lr': self.optim_opt.learning_rate, 
+                'params': filter(lambda p: p.requires_grad, self.disp_net.parameters()),
+                'lr': self.optim_opt.learning_rate,
                 'weight_decay': self.optim_opt.weight_decay
             },
         ]

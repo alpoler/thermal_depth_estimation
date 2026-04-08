@@ -3,8 +3,8 @@ out_dir: /mnt/my_disk/alper/thermal_depth_exps
 exp_name: exp_dustbin_ot
 total_epochs: &e 80
 batch_lim_per_epoch: 5000
-imgs_per_gpu: &b 1 # per GPU batch size
-workers_per_gpu: 1
+imgs_per_gpu: &b 2 # per GPU batch size
+workers_per_gpu: 2
 
 dataset:
   list: ["MS2"] # ["MS2", "ViViD", ... ]

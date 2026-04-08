@@ -349,7 +349,7 @@ class DustbinOTDisparityInit(BaseOTDisparityInit):
         margin = top2[:, 0] - top2[:, 1]                   # (B, H, W)
 
         feats = torch.stack([energy, margin], dim=-1)      # (B, H, W, 2)
-        dustbin_cost = -self.occ_head(feats)               # (B, H, W, 1)
+        dustbin_cost = self.occ_head(feats)               # (B, H, W, 1)
 
         cost = self._scatter_to_cost(scores)
         cost = torch.cat([cost, dustbin_cost], dim=-1)      # (B, H, W, C+1)
