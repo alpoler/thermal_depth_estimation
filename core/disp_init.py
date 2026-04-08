@@ -57,10 +57,13 @@ class BaseOT(nn.Module):
     """
 
     def __init__(self, W: int, C: int, num_iter: int = 10,
-                 epsilon: float = 1.0, occ_frac: float = 0.0):
+                 epsilon: float = 1.0, occ_frac: float = 0.0,
+                 adaptive_eps: bool = False, eps_base: float = 0.05):
         super().__init__()
         self.num_iter = num_iter
         self.eps = epsilon
+        self.adaptive_eps = adaptive_eps
+        self.eps_base = eps_base
         self.occ_frac = occ_frac
 
         D = C - W + 1
@@ -136,6 +139,11 @@ class BaseOT(nn.Module):
         Returns:
             P: (B, H, rows, cols) transport plan.
         """
+        if self.adaptive_eps:
+            with torch.no_grad():
+                scale = C[C < 1e3].std() + 1e-6
+            self.eps = self.eps_base * scale
+
         f, g = self._init_potentials(C)
 
         for _ in range(self.num_iter):
@@ -154,11 +162,13 @@ class UnbalancedOT(BaseOT):
     r"""Log-domain unbalanced Sinkhorn with Dykstra recentering."""
 
     def __init__(self, W: int, C: int, num_iter: int = 10,
-                 tau: float = 0.95, epsilon: float = 1.0):
+                 tau: float = 0.95, epsilon: float = 1.0,
+                 adaptive_eps: bool = False, eps_base: float = 0.05):
         self.tau = tau
         self.kappa = (1.0 - tau) / 2.0
         self.xi = (1.0 - tau) / (1.0 + tau)
-        super().__init__(W, C, num_iter=num_iter, epsilon=epsilon)
+        super().__init__(W, C, num_iter=num_iter, epsilon=epsilon,
+                         adaptive_eps=adaptive_eps, eps_base=eps_base)
 
     @staticmethod
     def _build_marginals(W: int, D: int, col_counts: Tensor, occ_frac: float):
@@ -209,9 +219,11 @@ class DustbinOT(BaseOT):
     """
 
     def __init__(self, W: int, C: int, num_iter: int = 10,
-                 epsilon: float = 1.0, occ_frac: float = 0.1):
+                 epsilon: float = 1.0, occ_frac: float = 0.1,
+                 adaptive_eps: bool = False, eps_base: float = 0.05):
         super().__init__(W, C, num_iter=num_iter, epsilon=epsilon,
-                         occ_frac=occ_frac)
+                         occ_frac=occ_frac, adaptive_eps=adaptive_eps,
+                         eps_base=eps_base)
 
     @staticmethod
     def _build_marginals(W: int, D: int, col_counts: Tensor, occ_frac: float):
@@ -311,11 +323,13 @@ class OTDisparityInit(BaseOTDisparityInit):
 
     def __init__(self, max_disp: int, image_width: int,
                  ot_iter: int = 10, epsilon: float = 1.0,
-                 tau: float = 0.95):
+                 tau: float = 0.95,
+                 adaptive_eps: bool = False, eps_base: float = 0.05):
         super().__init__(max_disp, image_width)
         self.epsilon = epsilon
         self.ot = UnbalancedOT(self.W, self.C, num_iter=ot_iter,
-                               tau=tau, epsilon=epsilon)
+                               tau=tau, epsilon=epsilon,
+                               adaptive_eps=adaptive_eps, eps_base=eps_base)
 
 
 # ---------------------------------------------------------------------------
@@ -334,11 +348,13 @@ class DustbinOTDisparityInit(BaseOTDisparityInit):
 
     def __init__(self, max_disp: int, image_width: int,
                  ot_iter: int = 10, epsilon: float = 1.0,
-                 occ_frac: float = 0.1):
+                 occ_frac: float = 0.1,
+                 adaptive_eps: bool = False, eps_base: float = 0.05):
         super().__init__(max_disp, image_width)
         self.epsilon = epsilon
         self.ot = DustbinOT(self.W, self.C, num_iter=ot_iter,
-                            epsilon=epsilon, occ_frac=occ_frac)
+                            epsilon=epsilon, occ_frac=occ_frac,
+                            adaptive_eps=adaptive_eps, eps_base=eps_base)
         self.occ_head = nn.Linear(2, 1)
 
     def forward(self, scores: Tensor) -> Tensor:
@@ -371,6 +387,9 @@ def build_disp_init(args) -> nn.Module:
 
     if method == "softmax":
         return SoftmaxDisparityInit(max_disp)
+    adaptive_eps = getattr(args, "ot_adaptive_eps", False)
+    eps_base = getattr(args, "ot_eps_base", 0.05)
+
     if method == "ot":
         return OTDisparityInit(
             max_disp=max_disp,
@@ -378,6 +397,8 @@ def build_disp_init(args) -> nn.Module:
             ot_iter=getattr(args, "ot_iter", 20),
             epsilon=getattr(args, "ot_epsilon", 1.0),
             tau=getattr(args, "ot_tau", 0.95),
+            adaptive_eps=adaptive_eps,
+            eps_base=eps_base,
         )
     if method == "ot_dustbin":
         return DustbinOTDisparityInit(
@@ -386,5 +407,7 @@ def build_disp_init(args) -> nn.Module:
             ot_iter=getattr(args, "ot_iter", 20),
             epsilon=getattr(args, "ot_epsilon", 1.0),
             occ_frac=getattr(args, "ot_occ_frac", 0.1),
+            adaptive_eps=adaptive_eps,
+            eps_base=eps_base,
         )
     raise ValueError(f"Unknown disp_init method: {method}")
