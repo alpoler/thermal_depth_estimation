@@ -30,19 +30,19 @@ def parse_args():
     # configure file (same options as train.py)
     parser.add_argument('--config', default="/home/akayabasi/thermal_depth_estimation/23-51-11/Base_Sup_Stereo_Depth.yaml",
                         help='config file path')
-    parser.add_argument('--out_dir', type=str, default='/mnt/my_disk/alper/thermal_depth_exps',
+    parser.add_argument('--out_dir', type=str, default='/mnt/mydisk/alper/thermal_depth_exps',
                         help='base output directory for saving predictions')
     parser.add_argument('--exp_name', type=str, default='predict', help='experiment name')
     parser.add_argument('--num_gpus', type=int, default=1, help='number of gpus')
     parser.add_argument('--seed', type=int, default=1024)
     parser.add_argument('--ckpt_path', type=str,
-                        default="/mnt/my_disk/alper/thermal_depth_exps/exp_unfrozen_cnet/ckpt_epoch=74_step=191400.ckpt",
+                        default="/mnt/mydisk/alper/thermal_depth_exps/exp_full_new_data/ckpt_epoch=41_step=200928.ckpt",
                         help='pretrained checkpoint path for model backbone')
     parser.add_argument('--resume', type=str, default=None,
                         help='lightning checkpoint to load (contains full training state)')
 
     # prediction-specific options
-    parser.add_argument('--split', type=str, default='val',
+    parser.add_argument('--split', type=str, default='test_rain',
                         choices=['val', 'test', 'test_day', 'test_night', 'test_rain'],
                         help='data split to run prediction on')
     parser.add_argument('--sequence', type=str, default=None,
@@ -203,9 +203,12 @@ if __name__ == '__main__':
             focal = batch["focal"]
             baseline = batch["baseline"]
 
-            psuedo_depth = ((focal[..., None, None] * baseline[..., None]) /
-                            batch["thr_psuedo_disparity"]).clamp(min=1e-3)
-            psuedo_depth = psuedo_depth.unsqueeze(1).to(device)
+            if "thr_psuedo_disparity" in batch and batch["thr_psuedo_disparity"] is not None:
+                psuedo_depth = ((focal[..., None, None] * baseline[..., None]) /
+                                batch["thr_psuedo_disparity"]).clamp(min=1e-3)
+                psuedo_depth = psuedo_depth.unsqueeze(1).to(device)
+            else:
+                psuedo_depth = None
 
             # Inference (model returns init_disp, pred_disp_pyramid)
             pred_disp = lightning_model.inference_disp(left_img, right_img, psuedo_depth)
