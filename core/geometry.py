@@ -13,7 +13,7 @@ import torch.nn as nn
 import numpy as np
 import re
 import sys
-sys.path.append("/home/akayabasi/foundation_stereo_thermal/")
+sys.path.append("/home/akayabasi/thermal_depth_estimation/")
 from torch.distributions import Beta
 from core.utils.utils import bilinear_sampler
 from core.extractor import ResidualBlock
@@ -77,7 +77,7 @@ class Combined_Geo_Encoding_Volume:
         _, _, _, W2 = fmap2.shape
         fmap1 = fmap1.reshape(B, D, H, W1)
         fmap2 = fmap2.reshape(B, D, H, W2)
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
           corr = torch.einsum('aijk,aijh->ajkh', F.normalize(fmap1.float(), dim=1), F.normalize(fmap2.float(), dim=1))
         corr = corr.reshape(B, H, W1, 1, W2)
         return corr

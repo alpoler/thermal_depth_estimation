@@ -1,5 +1,6 @@
-import os.path as osp
 import os
+import os.path as osp
+
 from argparse import ArgumentParser
 
 from mmengine.config import Config
@@ -19,12 +20,12 @@ def parse_args():
     parser = ArgumentParser()
 
     # configure file
-    parser.add_argument('--config',default="/home/eegrad/akayabasi/thermal_depth_estimation/23-51-11/Base_Sup_Stereo_Depth.yaml", help='config file path')
+    parser.add_argument('--config',default="/home/akayabasi/thermal_depth_estimation/23-51-11/Base_Sup_Stereo_Depth.yaml", help='config file path')
     parser.add_argument('--out_dir' , type=str, default='checkpoints')
     parser.add_argument('--exp_name', type=str, default='test_', help='experiment name')
     parser.add_argument('--num_gpus', type=int, default=2, help='number of gpus')
     parser.add_argument('--seed', type=int, default=1024)
-    parser.add_argument('--ckpt_path', type=str, default="/data/VishwanathSaragadam/foundation_stereo_pretrained/model_best_bp2.pth",
+    parser.add_argument('--ckpt_path', type=str, default="/mnt/my_disk/alper/foundation_stereo_pretrained/model_best_bp2.pth",
                         help='pretrained checkpoint path to load')
     parser.add_argument('--resume', type=str, default=None, help='resume from checkpoint')
 
@@ -38,11 +39,14 @@ if __name__ == '__main__':
     cfg = Config.fromfile(osp.join(args.config))
     
     ckpt_dir = args.ckpt_path
-    cfg_foundation_stereo = OmegaConf.load(f'/home/eegrad/akayabasi/thermal_depth_estimation/23-51-11/cfg.yaml')
+    cfg_foundation_stereo = OmegaConf.load(f'/home/akayabasi/thermal_depth_estimation/23-51-11/cfg.yaml')
     if 'vit_size' not in cfg_foundation_stereo:
         cfg_foundation_stereo['vit_size'] = 'vitl'
     for k in args.__dict__:
         cfg_foundation_stereo[k] = args.__dict__[k]
+    # Derive image_width from the training modality's train_size
+    train_modality = cfg.dataset[cfg.dataset.list[0]].train.modality
+    cfg_foundation_stereo['image_width'] = cfg.dataset[cfg.dataset.list[0]][train_modality].train_size[1]
     args_foundation_stereo = OmegaConf.create(cfg_foundation_stereo)
 
     model_type = cfg.model.get('model_type', 'foundation_stereo')
@@ -56,7 +60,15 @@ if __name__ == '__main__':
         strict_loading = True
 
     ckpt = torch.load(ckpt_dir)
-    model.load_state_dict(ckpt['model'], strict=strict_loading)
+    if strict_loading:
+        # Allow missing disp_init buffers (newly added, safe to re-initialize)
+        missing, unexpected = model.load_state_dict(ckpt['model'], strict=False)
+        if missing:
+            print(f"[INFO] Missing keys: {sorted(missing)}")
+        if unexpected:
+            print(f"[INFO] Unexpected keys: {sorted(unexpected)}")
+    else:
+        model.load_state_dict(ckpt['model'], strict=False)
     
     # show information
     print(f'Now training with {args.config}...')
@@ -82,6 +94,7 @@ if __name__ == '__main__':
     exp_name = cfg.get('exp_name', args.exp_name)
     work_dir = osp.join(out_dir, exp_name)
     os.makedirs(work_dir, exist_ok=True)
+
     if 'depth' in cfg.model.eval_mode: 
       val_loader_  = DataLoader(dataset['val']['depth'],
                                 batch_size=cfg.imgs_per_gpu,
@@ -110,22 +123,28 @@ if __name__ == '__main__':
     model = FoundationLighting(opt=cfg,model=model)
 
     # training
-    trainer = Trainer(strategy=DDPStrategy(find_unused_parameters=True) if args.num_gpus > 1 else None,
-                      accelerator="gpu",
-                      devices=args.num_gpus,
-                      default_root_dir=work_dir,
-                      num_nodes=1,
-                      num_sanity_val_steps=5,
-                      max_epochs=cfg.total_epochs,
-                      log_every_n_steps=5,
-                      check_val_every_n_epoch=1,
-                      limit_train_batches=cfg.batch_lim_per_epoch,
-                      callbacks=checkpoint_callbacks,
-                      benchmark=True,
-                      precision="bf16",
-                      gradient_clip_val=1.0,
-                      gradient_clip_algorithm="norm",
-                      sync_batchnorm=True)
+    # gradient clipping is handled manually when using aligned_mtl
+    use_aligned_mtl = cfg.loss.get('grad_method', 'none') == 'aligned_mtl'
+    trainer_kwargs = dict(
+        strategy=DDPStrategy(find_unused_parameters=True) if args.num_gpus > 1 else None,
+        accelerator="gpu",
+        devices=args.num_gpus,
+        default_root_dir=work_dir,
+        num_nodes=1,
+        num_sanity_val_steps=5,
+        max_epochs=cfg.total_epochs,
+        log_every_n_steps=5,
+        check_val_every_n_epoch=1,
+        limit_train_batches=cfg.batch_lim_per_epoch,
+        callbacks=checkpoint_callbacks,
+        benchmark=True,
+        precision="bf16",
+        sync_batchnorm=True,
+    )
+    if not use_aligned_mtl:
+        trainer_kwargs['gradient_clip_val'] = 1.0
+        trainer_kwargs['gradient_clip_algorithm'] = 'norm'
+    trainer = Trainer(**trainer_kwargs)
     try:
         resume_from_ckpt = None
         if args.resume is not None:

@@ -2,7 +2,8 @@
 __pycache__/
 venv/
 .env
-
+/slurm_logs
+*.sh
 # Data, Images, and Model Checkpoints
 *.mat
 *.pth
@@ -11,8 +12,9 @@ venv/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Environment file
 thermal_env.txt
 thermal_env.yml
-*.err
-*.out
-*.sh
+predict_pair.py
+predict_and_calibrate.py

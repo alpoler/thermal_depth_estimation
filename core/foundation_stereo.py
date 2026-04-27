@@ -8,6 +8,7 @@
 
 
 import torch,pdb,logging,timm
+from functools import partial
 import torch.nn as nn
 import torch.nn.functional as F
 import sys,os
@@ -23,13 +24,14 @@ from core.submodule import (
     ResnetBasicBlock3D, build_gwc_volume, build_concat_volume, disparity_regression,
     context_upsample
 )
+from core.disp_init import build_disp_init
 from core.utils.utils import InputPadder
 # from Utils import *
 import time,huggingface_hub
 
 
 try:
-    autocast = torch.cuda.amp.autocast
+    autocast = partial(torch.amp.autocast, 'cuda')
 except:
     class autocast:
         def __init__(self, enabled):
@@ -180,6 +182,7 @@ class FoundationStereo(nn.Module, huggingface_hub.PyTorchModelHubMixin):
           ResnetBasicBlock3D(volume_dim//2, volume_dim//2, kernel_size=3, stride=1, padding=1),
           nn.Conv3d(volume_dim//2, 1, kernel_size=7, padding=3),
         )
+        self.disp_init = build_disp_init(args)
 
         r = self.args.corr_radius
         dx = torch.linspace(-r, r, 2*r+1, requires_grad=False).reshape(1, 1, 2*r+1, 1)
@@ -221,9 +224,9 @@ class FoundationStereo(nn.Module, huggingface_hub.PyTorchModelHubMixin):
             comb_volume = self.cost_agg(comb_volume, features_left)
 
             # Init disp from geometry encoding volume
-            prob = F.softmax(self.classifier(comb_volume).squeeze(1), dim=1)  #(B, max_disp, H, W)
+            classifier_scores = self.classifier(comb_volume).squeeze(1)  # (B, D, H, W)
             if init_disp is None:
-              init_disp = disparity_regression(prob, self.args.max_disp//4)  # Weighted  sum of disparity
+              init_disp = self.disp_init(classifier_scores)
 
             cnet_list = self.cnet(image1, vit_feat=vit_feat, num_layers=self.args.n_gru_layers)   #(1/4, 1/8, 1/16)
             cnet_list = list(cnet_list)

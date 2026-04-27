@@ -10,7 +10,11 @@ from utils.visualization import *
 from losses.wavelet_loss import HFDTeacherBlock, CharbonnierLoss
 from losses.curvature_loss import CurvatureLoss
 from losses.pairwise_ordinal_loss import ordinal_loss as pairwise_ordinal_loss
+from losses.aligned_mtl import AlignedMTL
+from losses.dtcwt_loss import DTCWTSubbandLoss
 from core.utils.utils import rescale_modulation
+import robust_loss_pytorch.adaptive
+
 class StereoDepthBaseModule(LightningModule):
     def __init__(self, opt):
         super().__init__()
@@ -45,7 +49,24 @@ class StereoDepthBaseModule(LightningModule):
         self.pairwise_ordinal_loss_weight = opt.loss.get('pairwise_ordinal_loss_weight', 1.0)
         self.pairwise_ordinal_n_pairs = opt.loss.get('pairwise_ordinal_n_pairs', 10000)
         self.pairwise_ordinal_delta = opt.loss.get('pairwise_ordinal_delta', 0.01)
-
+        self.use_aligned_mtl = opt.loss.get('grad_method', 'none') == 'aligned_mtl'
+        if self.use_aligned_mtl:
+            self.aligned_mtl = AlignedMTL(weights=opt.loss.get('aligned_mtl_weights', [0.5, 0.5]))
+            self.automatic_optimization = False
+        self.dtcwt_loss_on = opt.loss.get('dtcwt_loss', False)
+        self.dtcwt_loss_weight = opt.loss.get('dtcwt_loss_weight', 1.0)    
+        if self.dtcwt_loss_on:
+            dtcwt_J = opt.loss.get('dtcwt_scales', 3)
+            dtcwt_alpha = opt.loss.get('dtcwt_alpha', 2.0)
+            dtcwt_levels = opt.loss.get('dtcwt_levels', None)
+            if dtcwt_levels is not None:
+                dtcwt_levels = [int(l) for l in dtcwt_levels]
+            self.dtcwt_criterion = DTCWTSubbandLoss(J=dtcwt_J, alpha=dtcwt_alpha, levels=dtcwt_levels)
+        self.robust_loss_on = opt.loss.get('robust_loss', False)
+        self.robust_loss_weight = opt.loss.get('robust_loss_weight', 1.0)
+        if self.robust_loss_on:
+            self.adaptive_loss = robust_loss_pytorch.adaptive.AdaptiveLossFunction(
+                num_dims=1, float_dtype=np.float32, device='cpu')
     def get_optimize_param(self):
         pass
     
@@ -55,6 +76,12 @@ class StereoDepthBaseModule(LightningModule):
         pass
     def configure_optimizers(self):
         optim_params = self.get_optimize_param()
+
+        if self.robust_loss_on:
+            optim_params.append({
+                'params': self.adaptive_loss.parameters(),
+                'lr': self.optim_opt.learning_rate,
+            })
 
         if self.optim_opt.optimizer == 'Adam' :
             optimizer = torch.optim.Adam(optim_params)
@@ -135,35 +162,64 @@ class StereoDepthBaseModule(LightningModule):
         focal     = batch["focal"]
         baseline  = batch["baseline"]
         psuedo_depth= ((focal[...,None,None]*baseline[...,None])) / psuedo_disparity_gt.clamp(min=1e-5)
-        psuedo_depth = psuedo_depth.clamp(max=1e4)
+        psuedo_depth = psuedo_depth.clamp(max=80)
 
         # network forward
         outputs = self.forward(left_img, right_img,iters=self.train_iters,psuedo_depth=psuedo_depth.unsqueeze(1))
         init_disp, predictions = outputs
-        total_loss  = self.get_losses(init_disp,predictions, disp_gt)
-        if self.pseudo_disparity:
-            psuedo_depth_loss = self.psuedo_disparity_loss(psuedo_disparity_gt,valid_regions_gt,predictions,init_disp,left_img)
-            total_loss+=psuedo_depth_loss
+        loss_depth = self.get_losses(init_disp, predictions, disp_gt)
 
-        # NaN watchdog
-        if not torch.isfinite(total_loss):
-            print(f"[NaN WATCHDOG] batch_idx={batch_idx}")
-            print(f"  psuedo_depth range: {psuedo_depth.min():.4f} ~ {psuedo_depth.max():.4f}")
-            print(f"  init_disp finite: {torch.isfinite(init_disp).all()}, min={init_disp.min():.4f}, max={init_disp.max():.4f}")
-            print(f"  predictions finite: {[torch.isfinite(p).all().item() for p in predictions]}")
-            print(f"  predictions range: {[f'{p.min():.4f}~{p.max():.4f}' for p in predictions]}")
-            base_loss = self.get_losses(init_disp, predictions, disp_gt)
-            print(f"  base get_losses: {base_loss.item()}")
-            if self.pseudo_disparity:
-                pd_loss = self.psuedo_disparity_loss(psuedo_disparity_gt, valid_regions_gt, predictions, init_disp, left_img)
-                print(f"  pseudo_disp_loss: {pd_loss.item()}")
-            # Replace NaN with zero to avoid crashing the run — gradient step is skipped
-            total_loss = torch.zeros(1, device=total_loss.device, requires_grad=True)
+        if self.pseudo_disparity:
+            loss_reg = self.psuedo_disparity_loss(psuedo_disparity_gt, valid_regions_gt, predictions, init_disp, left_img)
+        else:
+            loss_reg = None
+
+        if self.use_aligned_mtl and loss_reg is not None:
+            opt = self.optimizers()
+            trainable_params = [p for p in self.disp_net.parameters() if p.requires_grad]
+
+            opt.zero_grad()
+            self.manual_backward(loss_depth, retain_graph=True)
+            grads_depth = torch.cat([p.grad.flatten() if p.grad is not None
+                                     else torch.zeros(p.numel(), device=p.device)
+                                     for p in trainable_params])
+
+            opt.zero_grad()
+            self.manual_backward(loss_reg)
+            grads_reg = torch.cat([p.grad.flatten() if p.grad is not None
+                                   else torch.zeros(p.numel(), device=p.device)
+                                   for p in trainable_params])
+
+            combined = self.aligned_mtl(grads_depth, grads_reg)
+
+            idx = 0
+            for p in trainable_params:
+                length = p.numel()
+                p.grad = combined[idx:idx + length].view(p.shape)
+                idx += length
+
+            torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+
+            opt.step()
+
+            sch = self.lr_schedulers()
+            if sch is not None:
+                sch.step()
+
+            total_loss = loss_depth + loss_reg
+        else:
+            total_loss = loss_depth
+            if loss_reg is not None:
+                total_loss = total_loss + loss_reg
 
         # record log
         self.log('train/total_loss', total_loss)
+        self.log('train/depth_loss', loss_depth)
+        if loss_reg is not None:
+            self.log('train/reg_loss', loss_reg)
 
-
+        if self.use_aligned_mtl and loss_reg is not None:
+            return None
         return total_loss
 
 
@@ -254,12 +310,27 @@ class FoundationLighting(StereoDepthBaseModule):
         self.max_disp = opt.model.max_disp
         self.criterion = torch.nn.functional.smooth_l1_loss
 
+        # Epsilon scheduling for OT disp_init: eps_t = eps_end^(step/total_steps)
+        self.eps_end = opt.model.get('ot_eps_end', 0.5)
 
-
+    def on_train_batch_start(self, batch, batch_idx):
+        if hasattr(self.disp_net, 'disp_init') and hasattr(self.disp_net.disp_init, 'ot'):
+            total_steps = self.trainer.estimated_stepping_batches
+            t = self.global_step / max(total_steps - 1, 1)
+            eps = self.eps_end ** t
+            self.disp_net.disp_init.epsilon = eps
+            self.disp_net.disp_init.ot.eps = eps
+            if self.global_step % 100 == 0:
+                self.log('ot_epsilon', eps)
 
     def get_optimize_param(self):
-        unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4"
-                              "cost_agg", "corr_feature_att", "corr_stem"]
+        unfrozed_keywords = ["update_block", "feature.deconv32_16", "feature.deconv16_8", "feature.deconv8_4","feature.conv4",
+                              "cost_agg", "corr_feature_att", "corr_stem","cnet.conv2","cnet.outputs04","cnet.outputs08","cnet.outpus16","classifier"]
+
+        # Unfreeze dustbin_cost if using dustbin OT
+        from core.disp_init import DustbinOTDisparityInit
+        if isinstance(self.disp_net.disp_init, DustbinOTDisparityInit):
+            unfrozed_keywords.append("disp_init")
 
         # 2. Iterate through the network and freeze/unfreeze based on name
         for name, param in self.disp_net.named_parameters():
@@ -267,12 +338,12 @@ class FoundationLighting(StereoDepthBaseModule):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
-        
+
         # 3. Pass ONLY the trainable parameters (requires_grad=True) to the optimizer
         optim_params = [
             {
-                'params': filter(lambda p: p.requires_grad, self.disp_net.parameters()), 
-                'lr': self.optim_opt.learning_rate, 
+                'params': filter(lambda p: p.requires_grad, self.disp_net.parameters()),
+                'lr': self.optim_opt.learning_rate,
                 'weight_decay': self.optim_opt.weight_decay
             },
         ]
@@ -319,8 +390,12 @@ class FoundationLighting(StereoDepthBaseModule):
             # Exponentially increasing weight: Early steps have low weight, final step has high weight
             i_weight = adjusted_loss_gamma ** (n_predictions - i - 1)
 
-            # Absolute difference (L1 Loss)
-            i_loss = (disp_preds[i][valid_bool] - disp_gt[valid_bool]).abs()
+            if self.robust_loss_on:
+                residuals = (disp_preds[i][valid_bool] - disp_gt[valid_bool]).unsqueeze(-1)
+                i_loss = self.adaptive_loss.lossfun(residuals)
+            else:
+                # Absolute difference (L1 Loss)
+                i_loss = (disp_preds[i][valid_bool] - disp_gt[valid_bool]).abs()
             disp_loss += i_weight * i_loss.mean()
 
         return disp_loss
@@ -381,6 +456,16 @@ class FoundationLighting(StereoDepthBaseModule):
 
             stft_seq_loss = self.weighted_sequence_loss(predictions, target_masked, stft_crit, gamma=0.9)
             disp_loss = disp_loss + stft_seq_loss
+        if self.dtcwt_loss_on:
+            target_masked = psuedo_disparity_gt.unsqueeze(1)
+
+            def dtcwt_crit(pred, target):
+                return self.dtcwt_criterion(pred, target)
+
+            dtcwt_loss = self.weighted_sequence_loss(predictions, target_masked, dtcwt_crit, gamma=0.9)
+            disp_loss = disp_loss + self.dtcwt_loss_weight * dtcwt_loss
+            self.log('train/dtcwt_loss', dtcwt_loss.detach(), prog_bar=False)    
+            
         if self.wavelet_loss_on:
             # 1. Init Disp (upsampled)
             target_masked = psuedo_disparity_gt.unsqueeze(1)

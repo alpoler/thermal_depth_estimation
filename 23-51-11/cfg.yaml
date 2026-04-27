@@ -35,3 +35,9 @@ lbp_neighbor_offsets: "(-5,-5), (5,5), (5,-5), (-5,5), (-3,0), (3,0), (0,-3), (0
 modulation_ratio: 1.0
 modulation_alg: "sigmoid"
 model_type: "foundation_stereo"
+disp_init: "softmax"  # "softmax" or "ot"
+ot_iter: 20           # Sinkhorn iterations (only used when disp_init: "ot")
+ot_tau: 0.95
+ot_occ_frac: 0.1
+ot_adaptive_eps: true
+ot_eps_base: 0.05   # multiplier on std(C)
